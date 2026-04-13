@@ -12,10 +12,13 @@ from typing import Any
 
 import aiosqlite
 
+from src.api.auth import prefetch_credentials
+from src.api.balance import USDCBalanceFetcher
 from src.api.clob_client import CLOBClient
 from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.api.http import close_http_client
+from src.api.startup_checks import check_geoblock, latency_baseline
 from src.api.websocket_client import RTDSClient
 from src.core.config import get_settings
 from src.core.database import DEFAULT_DB_PATH, init_database
@@ -68,11 +71,35 @@ async def amain() -> None:
     await init_database()
 
     # --- shared SQLite connection (Phase 0 — preserva ganho iter 6) ------
-    # UMA conexão pela vida do processo. Propagada para o tracker, que
-    # propaga para detect_signal. Nunca fazer fallback para get_connection()
-    # dentro do hot path — mataria o ganho de 56×.
     shared_conn: aiosqlite.Connection = await aiosqlite.connect(DEFAULT_DB_PATH)
     log.info("shared_conn_opened")
+
+    # --- notifier (cedo pra poder alertar em falhas de startup) ----------
+    notifier = TelegramNotifier(
+        token=settings.env.telegram_bot_token,
+        chat_id=settings.env.telegram_chat_id,
+    )
+
+    # --- Phase 5: startup checks ----------------------------------------
+    geo = await check_geoblock()
+    if geo.get("blocked"):
+        notifier.notify(
+            f"🚨 IP BLOQUEADO pela Polymarket ({geo.get('country')}). "
+            "Trading indisponível no exchange internacional."
+        )
+        if settings.env.exchange_mode == "international":
+            log.critical("geoblock_fail_fast", **geo)
+            await shared_conn.close()
+            await close_http_client()
+            sys.exit(1)
+
+    rtts = await latency_baseline()
+    clob_rtt = rtts.get("clob")
+    if clob_rtt and clob_rtt > settings.env.latency_alert_threshold_ms:
+        notifier.notify(
+            f"⚠️ Latência alta no startup: CLOB={clob_rtt:.0f}ms "
+            f"(threshold {settings.env.latency_alert_threshold_ms}ms)"
+        )
 
     # --- in-memory state cache (Phase 4) ---------------------------------
     state = InMemoryState()
@@ -81,13 +108,26 @@ async def amain() -> None:
     # --- clients ----------------------------------------------------------
     data_client = DataAPIClient()
     gamma = GammaAPIClient()
-    clob = CLOBClient()  # read-only até injetar signer (EOA prefetch na Fase 5)
 
-    # --- notifier ---------------------------------------------------------
-    notifier = TelegramNotifier(
-        token=settings.env.telegram_bot_token,
-        chat_id=settings.env.telegram_chat_id,
-    )
+    # Phase 5 — EOA credentials prefetch. Em paper/dry-run e sem chave,
+    # CLOB fica read-only (post_order cairá em NotImplementedError, que o
+    # CopyEngine converte em skip_reason=LIVE_NOT_WIRED).
+    clob = CLOBClient()
+    if settings.config.executor.mode == "live" and settings.env.private_key:
+        try:
+            signed = await prefetch_credentials(
+                private_key=settings.env.private_key,
+                funder=settings.env.funder_address,
+                signature_type=settings.env.signature_type,
+            )
+            clob = CLOBClient(
+                signed_client=signed.standard,
+                neg_risk_signed_client=signed.neg_risk,
+            )
+        except Exception as exc:  # noqa: BLE001
+            notifier.notify(f"🚨 EOA auth prefetch falhou: {exc!r}")
+            log.critical("eoa_prefetch_failed", err=repr(exc))
+            raise
 
     # --- pool & tracker ---------------------------------------------------
     active_wallets: set[str] = set()
@@ -101,12 +141,18 @@ async def amain() -> None:
         conn=shared_conn, state=state,
     )
 
-    # --- balance cache (Phase 3) -----------------------------------------
-    # Stub: em live, substitua por chamada real ao Polygon RPC / CLOB balance.
-    async def _fetch_balance_stub() -> float:
-        return settings.config.executor.max_portfolio_usd
+    # --- balance cache (Phase 3/5) --------------------------------------
+    # Em live com funder_address real, usa fetcher on-chain (web3 + USDC.e
+    # Polygon). Sem funder → mantém stub com max_portfolio_usd pra não
+    # bloquear paper/dry-run.
+    funder = settings.env.funder_address
+    if settings.config.executor.mode == "live" and funder:
+        balance_fetcher = USDCBalanceFetcher(funder)
+    else:
+        async def balance_fetcher() -> float:  # type: ignore[misc]
+            return settings.config.executor.max_portfolio_usd
 
-    balance_cache = BalanceCache(_fetch_balance_stub)
+    balance_cache = BalanceCache(balance_fetcher)
 
     # --- executor ---------------------------------------------------------
     risk = RiskManager(settings.config.executor)

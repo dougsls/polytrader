@@ -1,0 +1,36 @@
+[Unit]
+Description=PolyTrader - Polymarket Copy Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/polytrader
+EnvironmentFile=/opt/polytrader/.env
+ExecStart=/opt/polytrader/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Logging via journald (JSON de structlog em stdout)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=polytrader
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/polytrader
+
+# Resource limits
+MemoryMax=2G
+CPUQuota=80%
+
+# Watchdog: systemd reinicia se bot travar (heartbeat = 60s, watchdog = 120s)
+WatchdogSec=120
+
+[Install]
+WantedBy=multi-user.target

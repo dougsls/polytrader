@@ -103,15 +103,40 @@ class CLOBClient:
         return self._signed
 
     @retry_on_425()
-    async def post_order(self, draft: OrderDraft, order_type: str = "GTC") -> dict[str, Any]:
-        """Envia ordem pronta para assinatura+post no CLOB.
+    async def post_order(
+        self, draft: OrderDraft, order_type: str = "GTC",
+    ) -> dict[str, Any]:
+        """Assina e envia ordem ao CLOB.
 
-        Por ora, é um shim: o py-clob-client tem API síncrona. Quando o
-        executor for implementado na Fase 3, este método ficará `async
-        def` rodando `loop.run_in_executor` para não bloquear o loop.
+        `py-clob-client` tem API síncrona (requests + eth_account.sign).
+        Chamamos via `run_in_executor` para não bloquear o event loop —
+        senão o tracker pararia de consumir o WS enquanto a ordem é
+        assinada+postada (~100-300ms NY→London).
         """
+        import asyncio
+
         signer = self._pick_signer(draft)
-        raise NotImplementedError(
-            "post_order será implementado na Fase 3 (executor) usando "
-            f"signer={type(signer).__name__!r}, order_type={order_type!r}"
-        )
+        loop = asyncio.get_running_loop()
+
+        def _build_and_post() -> dict[str, Any]:
+            # py-clob-client: OrderArgs + create_and_post_order
+            from py_clob_client.clob_types import OrderArgs, OrderType  # type: ignore[import-not-found]
+
+            args = OrderArgs(
+                token_id=draft.token_id,
+                price=float(draft.price),
+                size=float(draft.size),
+                side=draft.side,
+            )
+            ot = getattr(OrderType, order_type, OrderType.GTC)
+            order = signer.create_order(args)
+            resp: dict[str, Any] = signer.post_order(order, orderType=ot)
+            return resp
+
+        try:
+            return await loop.run_in_executor(None, _build_and_post)
+        except ImportError as e:
+            raise NotImplementedError(
+                "py-clob-client não disponível. Instale com `uv sync` e "
+                "garanta que signed_client foi injetado no startup."
+            ) from e
