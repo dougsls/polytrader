@@ -25,7 +25,7 @@ import orjson
 from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.core.config import load_yaml_config
-from src.core.database import get_connection, init_database
+from src.core.database import get_connection, init_database  # noqa: F401
 from src.tracker.signal_detector import detect_signal
 
 
@@ -74,16 +74,35 @@ def _sync_setup(tmp_path: Path) -> tuple[Path, GammaAPIClient, AsyncMock, dict]:
 # -------------------- Benchmark A: detect_signal --------------------
 
 def test_bench_detect_signal(benchmark, tmp_path: Path):
+    """Benchmark representa a chamada real em prod: um asyncio loop
+    persistente + conexão SQLite compartilhada pelo tracker."""
     db, gamma, data, trade = _sync_setup(tmp_path)
     cfg = load_yaml_config().tracker
 
-    def run_once() -> None:
-        asyncio.run(detect_signal(
-            trade=trade, wallet_score=0.8, cfg=cfg,
-            gamma=gamma, data_client=data, db_path=db,
-        ))
+    import aiosqlite
+    loop = asyncio.new_event_loop()
 
-    benchmark(run_once)
+    async def _open() -> aiosqlite.Connection:
+        c = await aiosqlite.connect(db)
+        c.row_factory = aiosqlite.Row
+        return c
+
+    conn = loop.run_until_complete(_open())
+
+    async def one_call() -> None:
+        await detect_signal(
+            trade=trade, wallet_score=0.8, cfg=cfg,
+            gamma=gamma, data_client=data, db_path=db, conn=conn,
+        )
+
+    def run_once() -> None:
+        loop.run_until_complete(one_call())
+
+    try:
+        benchmark(run_once)
+    finally:
+        loop.run_until_complete(conn.close())
+        loop.close()
 
 
 # -------------------- Benchmark B: RTDS parse + filter --------------------

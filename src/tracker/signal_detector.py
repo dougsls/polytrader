@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import aiosqlite
+
 from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.core.config import TrackerConfig
@@ -59,6 +61,7 @@ async def detect_signal(
     gamma: GammaAPIClient,
     data_client: DataAPIClient,  # noqa: ARG001 — reservado para futura validação on-chain
     db_path: Path = DEFAULT_DB_PATH,
+    conn: aiosqlite.Connection | None = None,
 ) -> TradeSignal | None:
     """Retorna TradeSignal qualificado ou None se o trade deve ser ignorado.
 
@@ -125,25 +128,35 @@ async def detect_signal(
     # --- Regra 2: Exit Syncing para SELL --------------------------------
     adjusted_size = size
     if side_raw == "SELL":
-        # Lookup atômico em conexão única (evita 2× open-thread aiosqlite).
-        async with get_connection(db_path) as db:
+        # Reutiliza conexão injetada pelo tracker em prod (1 conn-open por
+        # processo, não por sinal). Fallback para abrir conn só em tests
+        # legados que ainda não injetam.
+        async def _do_lookups(db: aiosqlite.Connection) -> tuple[float, float]:
             async with db.execute(
                 "SELECT COALESCE(SUM(size), 0) FROM bot_positions "
                 "WHERE token_id=? AND is_open=1",
                 (token_id,),
             ) as cur:
-                row = await cur.fetchone()
-                bot_size = float(row[0]) if row and row[0] else 0.0
-            if bot_size <= 0:
-                log.info("exit_sync_no_position", wallet=wallet, token=token_id)
-                return None
+                r1 = await cur.fetchone()
+            bot = float(r1[0]) if r1 and r1[0] else 0.0
+            if bot <= 0:
+                return bot, 0.0
             async with db.execute(
                 "SELECT size FROM whale_inventory "
                 "WHERE wallet_address=? AND token_id=?",
                 (wallet, token_id),
             ) as cur:
-                row = await cur.fetchone()
-                prior_whale = float(row["size"]) if row else 0.0
+                r2 = await cur.fetchone()
+            return bot, (float(r2["size"]) if r2 else 0.0)
+
+        if conn is not None:
+            bot_size, prior_whale = await _do_lookups(conn)
+        else:
+            async with get_connection(db_path) as db:
+                bot_size, prior_whale = await _do_lookups(db)
+        if bot_size <= 0:
+            log.info("exit_sync_no_position", wallet=wallet, token=token_id)
+            return None
         if prior_whale <= 0:
             # Não temos snapshot prévio; conservadoramente use 100% — ou
             # melhor: descarte este SELL e deixe o próximo ciclo capturar.
