@@ -176,24 +176,28 @@ async def detect_signal(
         "",
     )
 
-    return TradeSignal(
+    # model_construct pula validação — dados vêm do nosso código, não de input
+    # externo. Em prod o TradeSignal sai do signal_detector e entra no executor
+    # como objeto interno confiável; não há usuário fornecendo esses campos.
+    market_end_date = (
+        datetime.fromisoformat(end_iso.replace("Z", "+00:00")) if end_iso else None
+    )
+    return TradeSignal.model_construct(
         id=str(uuid.uuid4()),
         wallet_address=wallet,
         wallet_score=wallet_score,
         condition_id=condition_id,
         token_id=token_id,
-        side=side_raw,  # type: ignore[arg-type]
+        side=side_raw,
         size=adjusted_size,
         price=price,
         usd_value=adjusted_size * price if price > 0 else usd_value,
         market_title=market_title,
         outcome=outcome,
-        market_end_date=(
-            datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
-            if end_iso else None
-        ),
+        market_end_date=market_end_date,
         hours_to_resolution=hours,
         detected_at=trade_dt,
         source="websocket",
         status="pending",
+        skip_reason=None,
     )
