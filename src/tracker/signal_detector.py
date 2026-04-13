@@ -1,0 +1,169 @@
+"""Detecção e qualificação de sinais de copy-trading.
+
+Responsabilidades (nesta ordem):
+  1. Construir TradeSignal a partir de um trade bruto (polling ou RTDS).
+  2. Aplicar filtro de idade (signal_max_age_seconds).
+  3. Aplicar filtro de tamanho mínimo (min_trade_size_usd).
+  4. Aplicar **filtro de duração de mercado** (end_date via gamma).
+  5. **Regra 2 — Exit Syncing:** para SELL, verificar:
+       a. bot possui o token em `bot_positions` (is_open=1). Se não,
+          skip com reason="NO_POSITION_TO_SELL".
+       b. calcular o tamanho proporcional ao % que a baleia vendeu
+          (delta do whale_inventory). O sinal carrega esse tamanho
+          ajustado em vez do tamanho cru do trade.
+"""
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from src.api.data_client import DataAPIClient
+from src.api.gamma_client import GammaAPIClient
+from src.core.config import TrackerConfig
+from src.core.database import DEFAULT_DB_PATH, get_connection
+from src.core.logger import get_logger
+from src.core.models import TradeSignal
+from src.tracker.whale_inventory import get_whale_size
+
+log = get_logger(__name__)
+
+
+async def _bot_position_size(
+    token_id: str,
+    *,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> float:
+    async with get_connection(db_path) as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(size), 0) FROM bot_positions "
+            "WHERE token_id=? AND is_open=1",
+            (token_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    return float(row[0]) if row and row[0] else 0.0
+
+
+def _hours_to_resolution(end_date_iso: str | None) -> float | None:
+    if not end_date_iso:
+        return None
+    end = datetime.fromisoformat(end_date_iso.replace("Z", "+00:00"))
+    return (end - datetime.now(timezone.utc)).total_seconds() / 3600.0
+
+
+async def detect_signal(
+    *,
+    trade: dict[str, Any],
+    wallet_score: float,
+    cfg: TrackerConfig,
+    gamma: GammaAPIClient,
+    data_client: DataAPIClient,  # noqa: ARG001 — reservado para futura validação on-chain
+    db_path: Path = DEFAULT_DB_PATH,
+) -> TradeSignal | None:
+    """Retorna TradeSignal qualificado ou None se o trade deve ser ignorado.
+
+    Logs um motivo quando filtra (auditoria).
+    """
+    now = datetime.now(timezone.utc)
+
+    # --- Idade -----------------------------------------------------------
+    ts = trade.get("timestamp") or trade.get("time") or trade.get("t")
+    if ts:
+        trade_dt = (
+            datetime.fromtimestamp(int(ts), tz=timezone.utc)
+            if isinstance(ts, (int, float))
+            else datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        )
+        age = (now - trade_dt).total_seconds()
+        if age > cfg.signal_max_age_seconds:
+            log.info("signal_stale", age_s=age)
+            return None
+    else:
+        trade_dt = now
+
+    # --- Campos obrigatórios --------------------------------------------
+    wallet = trade.get("maker") or trade.get("makerAddress") or trade.get("user")
+    condition_id = trade.get("conditionId") or trade.get("condition_id")
+    token_id = trade.get("asset") or trade.get("tokenId") or trade.get("token_id")
+    side_raw = (trade.get("side") or "").upper()
+    if not (wallet and condition_id and token_id and side_raw in ("BUY", "SELL")):
+        return None
+    size = float(trade.get("size") or trade.get("amount") or 0)
+    price = float(trade.get("price") or 0)
+    usd_value = size * price if price > 0 else float(trade.get("usdSize") or 0)
+
+    if usd_value < cfg.min_trade_size_usd:
+        log.info("signal_too_small", usd=usd_value)
+        return None
+
+    # --- Filtro de duração de mercado -----------------------------------
+    market = await gamma.get_market(condition_id)
+    end_iso = market.get("end_date_iso") or market.get("end_date")
+    hours = _hours_to_resolution(end_iso)
+    f = cfg.market_duration_filter
+    if f.enabled:
+        if hours is None:
+            if f.fallback_behavior == "skip":
+                log.info("signal_no_end_date_skipped", condition_id=condition_id)
+                return None
+        else:
+            if hours > f.hard_block_days * 24:
+                log.info("signal_hard_block", hours=hours)
+                return None
+            if hours > f.max_hours_to_resolution:
+                log.info("signal_too_long", hours=hours)
+                return None
+            if hours < f.min_hours_to_resolution:
+                log.info("signal_too_close", hours=hours)
+                return None
+
+    # --- Regra 2: Exit Syncing para SELL --------------------------------
+    adjusted_size = size
+    if side_raw == "SELL":
+        bot_size = await _bot_position_size(token_id, db_path=db_path)
+        if bot_size <= 0:
+            log.info("exit_sync_no_position", wallet=wallet, token=token_id)
+            return None
+
+        prior_whale = await get_whale_size(wallet, token_id, db_path=db_path)
+        if prior_whale <= 0:
+            # Não temos snapshot prévio; conservadoramente use 100% — ou
+            # melhor: descarte este SELL e deixe o próximo ciclo capturar.
+            log.info("exit_sync_no_whale_snapshot", wallet=wallet, token=token_id)
+            return None
+        pct_sold = min(size / prior_whale, 1.0)
+        adjusted_size = bot_size * pct_sold
+        log.info(
+            "exit_sync_resize",
+            whale_sold_pct=pct_sold, bot_size=bot_size,
+            adjusted_size=adjusted_size,
+        )
+
+    market_title = market.get("question") or market.get("title") or ""
+    outcome = next(
+        (t.get("outcome", "") for t in market.get("tokens", []) if t.get("token_id") == token_id),
+        "",
+    )
+
+    return TradeSignal(
+        id=str(uuid.uuid4()),
+        wallet_address=wallet,
+        wallet_score=wallet_score,
+        condition_id=condition_id,
+        token_id=token_id,
+        side=side_raw,  # type: ignore[arg-type]
+        size=adjusted_size,
+        price=price,
+        usd_value=adjusted_size * price if price > 0 else usd_value,
+        market_title=market_title,
+        outcome=outcome,
+        market_end_date=(
+            datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+            if end_iso else None
+        ),
+        hours_to_resolution=hours,
+        detected_at=trade_dt,
+        source="websocket",
+        status="pending",
+    )

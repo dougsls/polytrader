@@ -1,0 +1,93 @@
+# === Scanner ===
+scanner:
+  enabled: true
+  scan_interval_minutes: 60
+  leaderboard_periods: ["7d", "30d"]
+  min_profit_usd: 500
+  min_win_rate: 0.55
+  min_trades: 10
+  max_wallets_tracked: 20
+
+  scoring_weights:
+    pnl: 0.25
+    win_rate: 0.20
+    consistency: 0.15
+    recency: 0.15
+    market_diversity: 0.10
+    short_term_ratio: 0.15
+
+  # Regra 3 — Detonação de Wash Traders
+  wash_trading_filter:
+    enabled: true
+    min_volume_to_pnl_ratio: 0.05
+    exclude_hyperactive: true
+
+  min_short_term_trade_ratio: 0.50
+  short_term_threshold_hours: 48
+
+# === Tracker ===
+tracker:
+  enabled: true
+  poll_interval_seconds: 15
+  use_websocket: true
+  signal_max_age_seconds: 300
+  min_trade_size_usd: 10
+
+  market_duration_filter:
+    enabled: true
+    max_hours_to_resolution: 48
+    min_hours_to_resolution: 0.1
+    prefer_range_hours: [1, 24]
+    hard_block_days: 3
+    check_end_date_field: "end_date_iso"
+    check_expiration_field: "expiration"
+    fallback_behavior: "skip"
+
+# === Executor ===
+executor:
+  enabled: true
+  mode: "live"
+
+  max_portfolio_usd: 500
+  max_position_usd: 100
+  max_positions: 15
+  sizing_mode: "proportional"
+  fixed_size_usd: 20
+  proportional_factor: 0.05
+
+  max_daily_loss_usd: 100
+  max_drawdown_pct: 0.20
+  min_price: 0.05
+  max_price: 0.95
+  avoid_resolved_markets: true
+  # Regra 1 — Anti-Slippage Anchoring (aborta se best_ask > whale_price * 1.03)
+  whale_max_slippage_pct: 0.03
+
+  default_order_type: "GTC"
+  use_limit_orders: true
+  limit_price_offset: 0.02
+  fok_fallback: true
+  fok_fallback_timeout_seconds: 30
+
+  copy_buys: true
+  copy_sells: true
+  min_confidence_score: 0.6
+  enforce_market_duration: true
+  skip_reason_on_long_market: "BLOCKED: market resolves in {days}d, max allowed is {max}h"
+
+# === Dashboard ===
+dashboard:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+  refresh_interval_seconds: 30
+  require_auth: true
+
+# === Notifier ===
+notifier:
+  enabled: true
+  notify_on_trade: true
+  notify_on_new_wallet: true
+  notify_on_risk_alert: true
+  notify_on_daily_summary: true
+  daily_summary_hour: 22
