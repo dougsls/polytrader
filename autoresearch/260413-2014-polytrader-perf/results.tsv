@@ -1,2 +1,12 @@
 iter	hash	change	detect_us	rtds_us	total_us	tests	guard	decision	notes
 0	3fbc152	baseline	25654.51	45.63	25700.14	42	pass	keep	baseline established
+1	645f525	merge bot+whale lookups into single sqlite conn	12311.34	50.44	12361.78	42	pass	keep	-52% — dropped 1 thread-init per signal
+2	reverted	drop PRAGMA foreign_keys in read path	12875.21	44.95	12920.16	42	pass	discard	noise within stddev, mean slightly worse
+3	355c0d5	inline _hours_to_resolution reuse now	11090.90	43.64	11134.54	42	pass	keep	-10% saved 1 datetime.now + 1 fn call
+4	reverted	multi-pragma executescript on connect	12770.24	54.69	12824.93	42	pass	discard	pragma parse overhead > benefit
+5	reverted	UNION ALL single query for bot+whale	14359.63	59.40	14419.03	42	pass	discard	subquery planner slower than 2 simple selects
+6	d8830b3	shared sqlite connection injected into detect_signal	702.28	46.46	748.73	42	pass	keep	-93% — biggest win, avoids conn-open per signal
+7	3278a13	drop Row factory use tuple rows	469.30	45.24	514.54	42	pass	keep	-33% — Row factory overhead measurable
+8	9ac3dd5	TradeSignal.model_construct skips pydantic validation	450.21	45.57	495.78	42	pass	keep	-4% — internal trusted data doesn't need revalidation
+9	reverted	single fromisoformat parse of end_iso	809.74	47.16	856.90	42	pass	discard	high variance noise; median also worse
+10	HEAD	time_ns+counter instead of uuid4 for signal.id	416.22	43.75	459.97	42	pass	keep	-7% — uuid4 is expensive, counter suffices for DB PK
