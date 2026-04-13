@@ -1,0 +1,2 @@
+iter	hash	change	detect_us	rtds_us	total_us	tests	guard	decision	notes
+0	3fbc152	baseline	25654.51	45.63	25700.14	42	pass	keep	baseline established

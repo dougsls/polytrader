@@ -25,7 +25,6 @@ from src.core.config import TrackerConfig
 from src.core.database import DEFAULT_DB_PATH, get_connection
 from src.core.logger import get_logger
 from src.core.models import TradeSignal
-from src.tracker.whale_inventory import get_whale_size
 
 log = get_logger(__name__)
 
@@ -121,12 +120,25 @@ async def detect_signal(
     # --- Regra 2: Exit Syncing para SELL --------------------------------
     adjusted_size = size
     if side_raw == "SELL":
-        bot_size = await _bot_position_size(token_id, db_path=db_path)
-        if bot_size <= 0:
-            log.info("exit_sync_no_position", wallet=wallet, token=token_id)
-            return None
-
-        prior_whale = await get_whale_size(wallet, token_id, db_path=db_path)
+        # Lookup atômico em conexão única (evita 2× open-thread aiosqlite).
+        async with get_connection(db_path) as db:
+            async with db.execute(
+                "SELECT COALESCE(SUM(size), 0) FROM bot_positions "
+                "WHERE token_id=? AND is_open=1",
+                (token_id,),
+            ) as cur:
+                row = await cur.fetchone()
+                bot_size = float(row[0]) if row and row[0] else 0.0
+            if bot_size <= 0:
+                log.info("exit_sync_no_position", wallet=wallet, token=token_id)
+                return None
+            async with db.execute(
+                "SELECT size FROM whale_inventory "
+                "WHERE wallet_address=? AND token_id=?",
+                (wallet, token_id),
+            ) as cur:
+                row = await cur.fetchone()
+                prior_whale = float(row["size"]) if row else 0.0
         if prior_whale <= 0:
             # Não temos snapshot prévio; conservadoramente use 100% — ou
             # melhor: descarte este SELL e deixe o próximo ciclo capturar.
