@@ -99,7 +99,12 @@ async def detect_signal(
     # --- Filtro de duração de mercado -----------------------------------
     market = await gamma.get_market(condition_id)
     end_iso = market.get("end_date_iso") or market.get("end_date")
-    hours = _hours_to_resolution(end_iso)
+    # Inlined de _hours_to_resolution — usa `now` já capturado acima.
+    if end_iso:
+        end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        hours = (end_dt - now).total_seconds() / 3600.0
+    else:
+        hours = None
     f = cfg.market_duration_filter
     if f.enabled:
         if hours is None:
