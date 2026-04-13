@@ -14,12 +14,16 @@ Responsabilidades (nesta ordem):
 """
 from __future__ import annotations
 
-import uuid
+import time
+import uuid  # noqa: F401 — kept for fallback
 from datetime import datetime, timezone
+from itertools import count
 from pathlib import Path
 from typing import Any
 
 import aiosqlite
+
+_signal_counter = count(0)
 
 from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
@@ -182,8 +186,11 @@ async def detect_signal(
     market_end_date = (
         datetime.fromisoformat(end_iso.replace("Z", "+00:00")) if end_iso else None
     )
+    # ID = ns-timestamp + counter (~100× mais rápido que uuid4, ainda único
+    # por processo). Persistência no DB usa PRIMARY KEY; não precisa ser RFC4122.
+    signal_id = f"{time.time_ns()}-{next(_signal_counter)}"
     return TradeSignal.model_construct(
-        id=str(uuid.uuid4()),
+        id=signal_id,
         wallet_address=wallet,
         wallet_score=wallet_score,
         condition_id=condition_id,
