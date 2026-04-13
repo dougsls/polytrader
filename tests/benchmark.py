@@ -83,9 +83,7 @@ def test_bench_detect_signal(benchmark, tmp_path: Path):
     loop = asyncio.new_event_loop()
 
     async def _open() -> aiosqlite.Connection:
-        c = await aiosqlite.connect(db)
-        c.row_factory = aiosqlite.Row
-        return c
+        return await aiosqlite.connect(db)  # tuple rows (mais leve que Row)
 
     conn = loop.run_until_complete(_open())
 

@@ -147,7 +147,7 @@ async def detect_signal(
                 (wallet, token_id),
             ) as cur:
                 r2 = await cur.fetchone()
-            return bot, (float(r2["size"]) if r2 else 0.0)
+            return bot, (float(r2[0]) if r2 else 0.0)
 
         if conn is not None:
             bot_size, prior_whale = await _do_lookups(conn)
