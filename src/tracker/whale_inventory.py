@@ -13,6 +13,7 @@ from typing import Any
 from src.api.data_client import DataAPIClient
 from src.core.database import DEFAULT_DB_PATH, get_connection
 from src.core.logger import get_logger
+from src.core.state import InMemoryState
 
 log = get_logger(__name__)
 
@@ -22,10 +23,12 @@ async def snapshot_whale(
     wallet_address: str,
     *,
     db_path: Path = DEFAULT_DB_PATH,
+    state: InMemoryState | None = None,
 ) -> list[dict[str, Any]]:
     """Pull + persistência do inventário de uma baleia.
 
-    Retorna a lista de posições persistidas (caller usa para logging).
+    Faz write-through no `state` (Fase 4) para que o fast-path do
+    `detect_signal` veja o snapshot em < 1μs.
     """
     positions = await data_client.positions(wallet_address)
     now = datetime.now(timezone.utc).isoformat()
@@ -38,6 +41,8 @@ async def snapshot_whale(
             avg_price = pos.get("avgPrice") or pos.get("avg_price")
             if not token_id or size <= 0:
                 continue
+            if state is not None:
+                state.whale_set(wallet_address, token_id, size)
             await db.execute(
                 """
                 INSERT INTO whale_inventory

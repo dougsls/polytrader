@@ -14,6 +14,7 @@ from pathlib import Path
 from src.core.database import DEFAULT_DB_PATH, get_connection
 from src.core.logger import get_logger
 from src.core.models import CopyTrade, TradeSignal
+from src.core.state import InMemoryState
 
 log = get_logger(__name__)
 
@@ -27,8 +28,19 @@ async def apply_fill(
     executed_size: float,
     executed_price: float,
     db_path: Path = DEFAULT_DB_PATH,
+    state: InMemoryState | None = None,
 ) -> None:
-    """Atualiza bot_positions a partir de um fill confirmado."""
+    """Atualiza bot_positions a partir de um fill confirmado.
+
+    Se `state` for fornecido, faz write-through no cache RAM — mantém a
+    consistência com o Exit Syncing do detect_signal (Fase 4).
+    """
+    # Write-through no state cache antes do DB — leitura no tracker não
+    # pode esperar fsync. Em caso de crash entre update RAM e commit DB,
+    # `state.reload_from_db()` no restart corrige.
+    if state is not None:
+        delta = executed_size if signal.side == "BUY" else -executed_size
+        state.bot_add(signal.token_id, delta)
     now = datetime.now(timezone.utc).isoformat()
     async with get_connection(db_path) as db:
         async with db.execute(

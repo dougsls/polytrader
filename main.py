@@ -10,15 +10,19 @@ import signal
 import sys
 from typing import Any
 
+import aiosqlite
+
 from src.api.clob_client import CLOBClient
 from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.api.http import close_http_client
 from src.api.websocket_client import RTDSClient
 from src.core.config import get_settings
-from src.core.database import init_database
+from src.core.database import DEFAULT_DB_PATH, init_database
 from src.core.logger import configure_logging, get_logger
 from src.core.models import CopyTrade, RiskState, TradeSignal
+from src.core.state import InMemoryState
+from src.executor.balance_cache import BalanceCache
 from src.executor.copy_engine import CopyEngine
 from src.executor.risk_manager import RiskManager
 from src.notifier.telegram import TelegramNotifier
@@ -63,10 +67,21 @@ async def amain() -> None:
 
     await init_database()
 
+    # --- shared SQLite connection (Phase 0 — preserva ganho iter 6) ------
+    # UMA conexão pela vida do processo. Propagada para o tracker, que
+    # propaga para detect_signal. Nunca fazer fallback para get_connection()
+    # dentro do hot path — mataria o ganho de 56×.
+    shared_conn: aiosqlite.Connection = await aiosqlite.connect(DEFAULT_DB_PATH)
+    log.info("shared_conn_opened")
+
+    # --- in-memory state cache (Phase 4) ---------------------------------
+    state = InMemoryState()
+    await state.reload_from_db(conn=shared_conn)
+
     # --- clients ----------------------------------------------------------
     data_client = DataAPIClient()
     gamma = GammaAPIClient()
-    clob = CLOBClient()  # read-only até injetar signer
+    clob = CLOBClient()  # read-only até injetar signer (EOA prefetch na Fase 5)
 
     # --- notifier ---------------------------------------------------------
     notifier = TelegramNotifier(
@@ -83,7 +98,15 @@ async def amain() -> None:
         cfg=settings.config.tracker,
         data_client=data_client, gamma=gamma, ws_client=rtds,
         wallet_scores=wallet_scores, queue=signal_queue,
+        conn=shared_conn, state=state,
     )
+
+    # --- balance cache (Phase 3) -----------------------------------------
+    # Stub: em live, substitua por chamada real ao Polygon RPC / CLOB balance.
+    async def _fetch_balance_stub() -> float:
+        return settings.config.executor.max_portfolio_usd
+
+    balance_cache = BalanceCache(_fetch_balance_stub)
 
     # --- executor ---------------------------------------------------------
     risk = RiskManager(settings.config.executor)
@@ -117,6 +140,7 @@ async def amain() -> None:
         asyncio.create_task(heartbeat_loop(shutdown), name="heartbeat"),
         asyncio.create_task(monitor.run_websocket(), name="tracker-ws"),
         asyncio.create_task(engine.run_loop(), name="copy-engine"),
+        asyncio.create_task(balance_cache.run_loop(), name="balance-cache"),
     ]
 
     notifier.notify(
@@ -128,9 +152,11 @@ async def amain() -> None:
     log.info("shutting_down")
 
     await rtds.close()
+    await balance_cache.stop()
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+    await shared_conn.close()
     await close_http_client()
     notifier.notify("🔴 PolyTrader offline")
     log.info("shutdown_complete")

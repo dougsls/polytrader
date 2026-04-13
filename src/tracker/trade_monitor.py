@@ -8,12 +8,15 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import aiosqlite
+
 from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.api.websocket_client import RTDSClient
 from src.core.config import TrackerConfig
 from src.core.database import DEFAULT_DB_PATH
 from src.core.logger import get_logger
+from src.core.state import InMemoryState
 from src.tracker.signal_detector import detect_signal
 
 log = get_logger(__name__)
@@ -30,6 +33,8 @@ class TradeMonitor:
         wallet_scores: dict[str, float],
         queue: asyncio.Queue,
         db_path: Path = DEFAULT_DB_PATH,
+        conn: aiosqlite.Connection | None = None,
+        state: InMemoryState | None = None,
     ) -> None:
         self._cfg = cfg
         self._data = data_client
@@ -38,6 +43,8 @@ class TradeMonitor:
         self._scores = wallet_scores
         self._queue = queue
         self._db_path = db_path
+        self._conn = conn
+        self._state = state
         self._seen: set[tuple[str, str, str, str, int]] = set()
 
     def _dedup_key(self, trade: dict) -> tuple[str, str, str, str, int]:
@@ -63,6 +70,8 @@ class TradeMonitor:
                 gamma=self._gamma,
                 data_client=self._data,
                 db_path=self._db_path,
+                conn=self._conn,
+                state=self._state,
             )
             if signal:
                 await self._queue.put(signal)

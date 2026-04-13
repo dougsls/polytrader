@@ -26,6 +26,7 @@ from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.core.config import load_yaml_config
 from src.core.database import get_connection, init_database  # noqa: F401
+from src.core.state import InMemoryState
 from src.tracker.signal_detector import detect_signal
 
 
@@ -87,10 +88,16 @@ def test_bench_detect_signal(benchmark, tmp_path: Path):
 
     conn = loop.run_until_complete(_open())
 
+    # Fase 4 — state cache preenchido representa o regime operacional real.
+    state = InMemoryState()
+    state.bot_set("t1", 50.0)
+    state.whale_set("0xW", "t1", 200.0)
+
     async def one_call() -> None:
         await detect_signal(
             trade=trade, wallet_score=0.8, cfg=cfg,
-            gamma=gamma, data_client=data, db_path=db, conn=conn,
+            gamma=gamma, data_client=data, db_path=db,
+            conn=conn, state=state,
         )
 
     def run_once() -> None:
