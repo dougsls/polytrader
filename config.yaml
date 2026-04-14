@@ -46,9 +46,14 @@ tracker:
 # === Executor ===
 executor:
   enabled: true
-  mode: "live"
+  # SAFE-GUARD: default é paper. Checklist do README exige paper 7-14d
+  # ANTES de live. Troque para "live" manualmente apenas após observar
+  # métricas no /metrics + Telegram daily e confirmar convergência.
+  mode: "paper"
 
-  max_portfolio_usd: 500
+  # Teto de capital no primeiro live — representa 10% do portfolio-alvo.
+  # Escalar progressivamente para 500 após 3-5 dias de live cauteloso.
+  max_portfolio_usd: 50
   max_position_usd: 100
   max_positions: 15
   sizing_mode: "proportional"
