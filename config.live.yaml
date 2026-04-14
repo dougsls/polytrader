@@ -1,0 +1,139 @@
+# =============================================================
+# config.live.yaml — PRESET PRODUÇÃO (LIVE com dinheiro real)
+# =============================================================
+# Diferenças vs config.yaml (paper):
+#   • mode: "live" → posta ordens reais no CLOB
+#   • paper_perfect_mirror: false → aplica TODOS os filtros de risco
+#   • Banca inicial: $50 (laboratório barato)
+#   • Slippage 3% (era 50% paper)
+#   • Spread max 2% (era 1.0 paper)
+#   • Cofre 50% + drawdown circuit 90% (mais conservador)
+#   • Cap por mercado 3% (era 5%)
+#   • daily_loss/drawdown ajustados pra valores reais
+#
+# Como ativar:
+#   cp config.live.yaml config.yaml
+#   sudo systemctl restart polytrader
+#
+# REVERTER pra paper:
+#   git checkout config.yaml
+#   sudo systemctl restart polytrader
+# =============================================================
+
+scanner:
+  enabled: true
+  scan_interval_minutes: 60
+  leaderboard_periods: ["7d", "30d"]
+  min_profit_usd: 500
+  min_win_rate: 0.55
+  min_trades: 10
+  max_wallets_tracked: 5
+
+  scoring_weights:
+    pnl: 0.25
+    win_rate: 0.20
+    consistency: 0.15
+    recency: 0.15
+    market_diversity: 0.10
+    short_term_ratio: 0.15
+
+  wash_trading_filter:
+    enabled: true
+    min_volume_to_pnl_ratio: 0.05
+    exclude_hyperactive: true
+
+  min_short_term_trade_ratio: 0.50
+  short_term_threshold_hours: 48
+  manual_whitelist: []
+
+tracker:
+  enabled: true
+  poll_interval_seconds: 5
+  use_websocket: true
+  signal_max_age_seconds: 300       # só sinais frescos (≤5min)
+  min_trade_size_usd: 10            # filtra micro-trades (live)
+
+  market_duration_filter:
+    enabled: true
+    max_hours_to_resolution: 48
+    min_hours_to_resolution: 0.1
+    prefer_range_hours: [1, 24]
+    hard_block_days: 3
+    check_end_date_field: "end_date_iso"
+    check_expiration_field: "expiration"
+    fallback_behavior: "skip"
+
+executor:
+  enabled: true
+
+  # ⚡ LIVE — posta ordens reais
+  mode: "live"
+
+  # 💰 BANCA — começar pequeno pra validar
+  max_portfolio_usd: 50              # laboratório barato (1ª semana)
+  max_position_usd: 5                # max $5 por fill individual
+  max_positions: 10                  # max 10 posições simultâneas
+
+  # 📐 SIZING — proporcional à convicção da whale, mas pequeno
+  sizing_mode: "whale_proportional"
+  fixed_size_usd: 3
+  proportional_factor: 0.05          # 5% por trade (era 10% paper)
+  whale_sizing_factor: 1.0
+
+  # 🚫 NUNCA ATIVAR EM LIVE — bypass total de filtros
+  paper_perfect_mirror: false
+
+  # 🎯 Concentração — max 3% por mercado único
+  max_position_pct_of_bank: 0.03
+
+  # 🏦 PRESERVAÇÃO MÁXIMA — 50% dos lucros pro cofre, drawdown 10%
+  profit_safe_pct: 0.50
+  min_active_bank_pct: 0.90          # pausa se ativa < 90% (drawdown max 10%)
+
+  # ⚠️ Realismo paper — sem efeito em live (já são reais)
+  paper_apply_fees: 0.0
+  paper_simulate_slippage: 0.0
+
+  # 🛑 Stop-loss diários
+  max_daily_loss_usd: 10             # 20% da banca → halt 24h
+  max_drawdown_pct: 0.15             # halt total se drawdown > 15%
+  min_price: 0.10                    # não compra outcomes < 10¢ (lottery ticket)
+  max_price: 0.90                    # não compra outcomes > 90¢ (sem upside)
+  avoid_resolved_markets: true
+
+  # 🎯 Anti-slippage anchor — Regra 1
+  whale_max_slippage_pct: 0.03       # aborta se preço já moveu > 3% do whale
+  max_spread: 0.02                   # rejeita pool ilíquido (spread > 2¢)
+
+  # 📋 Tipo de ordem — GTC limit + FOK fallback (compensa latência NY→London)
+  default_order_type: "GTC"
+  limit_price_offset: 0.02
+  fok_fallback: true
+  fok_fallback_timeout_seconds: 30
+
+  # 🕐 H4 — auto-close de posições órfãs (whale nunca vendeu)
+  max_position_age_hours: 48.0
+
+  # 🏷️ H6 — concentração máxima por categoria
+  max_tag_exposure_pct: 0.20         # max 20% em uma tag (sports, crypto, politics)
+
+  copy_buys: true
+  copy_sells: true
+  min_confidence_score: 0.6
+  enforce_market_duration: true
+  skip_reason_on_long_market: "BLOCKED: market resolves in {days}d, max allowed is {max}h"
+
+dashboard:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+  refresh_interval_seconds: 30
+  require_auth: true
+
+notifier:
+  enabled: true
+  notify_on_trade: true
+  notify_on_new_wallet: true
+  notify_on_risk_alert: true
+  notify_on_daily_summary: true
+  daily_summary_hour: 22
