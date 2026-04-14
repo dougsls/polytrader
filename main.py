@@ -6,6 +6,7 @@ Inicializa schema (idempotente), configura logging, e entra em asyncio.gather.
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from src.executor.copy_engine import CopyEngine
 from src.executor.position_sync import reconcile_bot_positions
 from src.executor.risk_manager import RiskManager
 from src.executor.risk_state import build_risk_state
+from src.executor.stale_cleanup import stale_position_cleanup_loop
 from src.notifier.daily_summary import daily_summary_loop
 from src.notifier.telegram import TelegramNotifier
 from src.scanner.scanner import Scanner
@@ -42,6 +44,7 @@ from src.tracker.trade_monitor import TradeMonitor
 log = get_logger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS = 60
+KILL_SWITCH_PATH = "/opt/polytrader/KILL_SWITCH"  # UNIX standard; no Windows é ignorado
 
 # sd_notify — habilitado apenas em Linux com systemd. Em Windows/dev o
 # ImportError é engolido; o bot vira no-op e segue vivo.
@@ -90,10 +93,14 @@ async def latency_monitor_loop(
 async def heartbeat_loop(shutdown: asyncio.Event) -> None:
     while not shutdown.is_set():
         log.info("heartbeat", systemd=_HAS_SYSTEMD)
-        # Avisa systemd que o processo está vivo (WatchdogSec=120 na unit).
-        # Sem isso, systemd mata e reinicia a cada 120s em produção.
         if _HAS_SYSTEMD:
             _sd_notify("WATCHDOG=1")
+        # H7 — kill-switch físico. Operador faz `touch /opt/polytrader/KILL_SWITCH`
+        # via SSH/SCP e o bot para no próximo heartbeat (<= 60s).
+        if os.path.exists(KILL_SWITCH_PATH):
+            log.critical("kill_switch_detected", path=KILL_SWITCH_PATH)
+            shutdown.set()
+            return
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
@@ -104,6 +111,14 @@ async def amain() -> None:
     settings = get_settings()
     configure_logging(settings.env.log_level)
     started_at = datetime.now(timezone.utc)
+
+    # M8 — fail-fast: require_auth=True + secret vazio = dashboard 503 eterno.
+    if settings.config.dashboard.require_auth and not settings.env.dashboard_secret:
+        log.critical(
+            "dashboard_secret_missing",
+            msg="require_auth=true mas DASHBOARD_SECRET vazio. Configure .env.",
+        )
+        sys.exit(1)
     log.info(
         "startup",
         mode=settings.config.executor.mode,
@@ -382,6 +397,13 @@ async def amain() -> None:
             name="latency-monitor",
         ),
         asyncio.create_task(dashboard_server.serve(), name="dashboard"),
+        asyncio.create_task(
+            stale_position_cleanup_loop(
+                shutdown=shutdown, cfg=settings.config.executor,
+                conn=shared_conn, signal_queue=signal_queue,
+            ),
+            name="stale-cleanup",
+        ),
         asyncio.create_task(
             daily_summary_loop(
                 shutdown=shutdown,

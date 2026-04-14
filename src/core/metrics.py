@@ -16,7 +16,7 @@ Guidelines:
 """
 from __future__ import annotations
 
-from prometheus_client import CollectorRegistry, Counter, Gauge, generate_latest
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
 
 # Registry próprio — evita colisão com outros serviços no mesmo processo.
 REGISTRY = CollectorRegistry()
@@ -62,6 +62,13 @@ queue_size = Gauge(
 halted = Gauge(
     "polytrader_halted",
     "1 se o RiskManager está em halt, 0 caso contrário.",
+    registry=REGISTRY,
+)
+
+signal_to_fill_seconds = Histogram(
+    "polytrader_signal_to_fill_seconds",
+    "Latência do handle_signal (RTDS → apply_fill). Mede CLOB signing + net.",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0),
     registry=REGISTRY,
 )
 

@@ -142,6 +142,18 @@ class CLOBClient:
             ot = getattr(OrderType, order_type, OrderType.GTC)
             order = signer.create_order(args, options=options)
             resp: dict[str, Any] = signer.post_order(order, orderType=ot)
+            # C1 — valida resposta. A SDK retorna success/errorMsg/orderID.
+            # Sem esse check, rejeição vira "sucesso" e apply_fill grava
+            # posição fantasma no DB.
+            if not resp.get("success", False) or resp.get("errorMsg"):
+                from src.core.exceptions import PolymarketAPIError
+
+                raise PolymarketAPIError(
+                    f"CLOB rejected: {resp.get('errorMsg') or resp}",
+                    endpoint="/order",
+                    status=400,
+                    detail=str(resp)[:500],
+                )
             return resp
 
         try:

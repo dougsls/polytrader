@@ -156,10 +156,13 @@ class ExecutorConfig(_StrictModel):
     # Escudo de spread dinâmico (ask - bid). 0.02 = 2 centavos.
     max_spread: float = Field(gt=0, le=0.5, default=0.02)
     default_order_type: str
-    use_limit_orders: bool
     limit_price_offset: float = Field(ge=0)
     fok_fallback: bool
     fok_fallback_timeout_seconds: int = Field(ge=1)
+    max_position_age_hours: float = Field(gt=0, default=48.0)
+    # H6 — cap de exposure por tag/categoria (ex: "politics", "sports").
+    # 0.30 = nenhuma tag pode concentrar mais que 30% do portfolio.
+    max_tag_exposure_pct: float = Field(gt=0, le=1.0, default=0.30)
     copy_buys: bool
     copy_sells: bool
     min_confidence_score: float = Field(ge=0.0, le=1.0)

@@ -66,10 +66,13 @@ executor:
   max_spread: 0.02
 
   default_order_type: "GTC"
-  use_limit_orders: true
   limit_price_offset: 0.02
   fok_fallback: true
   fok_fallback_timeout_seconds: 30
+  # H4 — auto-close de posições que a baleia deixou órfãs (nunca vendeu).
+  max_position_age_hours: 48.0
+  # H6 — concentração máxima numa tag/categoria (politics, sports, crypto).
+  max_tag_exposure_pct: 0.30
 
   copy_buys: true
   copy_sells: true
