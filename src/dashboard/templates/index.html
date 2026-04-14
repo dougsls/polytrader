@@ -142,6 +142,10 @@
     font-weight: 600; font-size: 10px;
     text-transform: uppercase; letter-spacing: 0.8px;
   }
+  .data-table th[title] {
+    cursor: help;
+    border-bottom: 1px dotted rgba(120,140,180,0.4);
+  }
   .data-table tbody tr:last-child td { border-bottom: none; }
   .data-table tbody tr:hover { background: rgba(78, 163, 255, 0.04); }
   @media (max-width: 720px) {
@@ -545,8 +549,14 @@ function renderSignals(rows) {
     return;
   }
   let html = '<table class="data-table"><thead><tr>' +
-    '<th>Quando</th><th>Whale</th><th>Side</th><th>Mercado</th>' +
-    '<th>Preço</th><th>USD</th><th>TTL</th><th>Status</th></tr></thead><tbody>';
+    '<th title="Tempo desde que a whale executou o trade na Polymarket">Quando</th>' +
+    '<th title="Endereço da carteira da whale (truncado). Pool de 20 elite traders.">Whale</th>' +
+    '<th title="BUY = whale comprou outcome / SELL = whale vendeu posição">Side</th>' +
+    '<th title="Título do mercado de previsão na Polymarket">Mercado</th>' +
+    '<th title="Preço (probabilidade 0-1) que a whale pagou pelo outcome">Preço</th>' +
+    '<th title="Valor em USD da posição da whale">USD</th>' +
+    '<th title="Time-to-live: horas até o mercado resolver. Bot só copia <48h.">TTL</th>' +
+    '<th title="EXECUTED = bot copiou. SKIPPED = filtro bloqueou (motivo abaixo).">Status</th></tr></thead><tbody>';
   for (const s of rows) {
     const ttl = s.hours_to_resolution != null ? `${s.hours_to_resolution.toFixed(1)}h` : '—';
     const title = (s.market_title || '—');
@@ -573,8 +583,14 @@ function renderWallets(rows) {
   const el = document.getElementById('whales-body');
   if (!rows.length) { el.innerHTML = '<div class="empty">Nenhuma whale no pool.</div>'; return; }
   let html = '<table class="data-table"><thead><tr>' +
-    '<th>Nome</th><th>Address</th><th>Score</th><th>PnL Total</th>' +
-    '<th>Win Rate</th><th>Trades</th><th>Último</th><th>Status</th></tr></thead><tbody>';
+    '<th title="Pseudônimo público da whale na Polymarket">Nome</th>' +
+    '<th title="Endereço Ethereum/Polygon da carteira (truncado)">Address</th>' +
+    '<th title="Score composto 0-1: combina PnL, win-rate, consistência e diversidade">Score</th>' +
+    '<th title="Lucro/prejuízo total acumulado em USD desde o início do tracking">PnL Total</th>' +
+    '<th title="% de trades lucrativos. Acima de 55% é considerado bom.">Win Rate</th>' +
+    '<th title="Quantidade total de trades executados pela whale">Trades</th>' +
+    '<th title="Tempo desde o último trade observado da whale">Último</th>' +
+    '<th title="ATIVA = sendo monitorada em tempo real / INATIVA = removida do pool">Status</th></tr></thead><tbody>';
   for (const w of rows) {
     const last = w.last_trade_at ? fmt.time(w.last_trade_at) : '—';
     html += `<tr>
@@ -609,8 +625,13 @@ function renderTrades(rows) {
     return;
   }
   let html = '<table class="data-table"><thead><tr>' +
-    '<th>Quando</th><th>Side</th><th>Mercado</th><th>Size</th>' +
-    '<th>Preço</th><th>Slip</th><th>Status</th></tr></thead><tbody>';
+    '<th title="Tempo desde que o bot enviou a ordem">Quando</th>' +
+    '<th title="BUY = bot comprou outcome / SELL = bot vendeu posição">Side</th>' +
+    '<th title="Mercado onde a ordem foi enviada">Mercado</th>' +
+    '<th title="Quantidade de tokens (shares de outcome) negociados">Size</th>' +
+    '<th title="Preço médio de execução da ordem (0-1 = probabilidade)">Preço</th>' +
+    '<th title="Slippage: diferença entre preço da whale e preço executado pelo bot">Slip</th>' +
+    '<th title="FILLED = preenchida / PENDING = aguardando / FAILED = erro">Status</th></tr></thead><tbody>';
   for (const t of rows) {
     const size = t.executed_size ?? t.intended_size;
     const price = t.executed_price ?? t.intended_price;
@@ -640,9 +661,15 @@ function resolveBadge(h) {
 
 function renderOpenPositionsTable(list) {
   let html = '<table class="data-table"><thead><tr>' +
-    '<th>Mercado</th><th>Outcome</th><th>Size</th>' +
-    '<th>Entry</th><th>Atual</th><th>PnL $</th><th>PnL %</th>' +
-    '<th>Resolve em</th><th>Aberta há</th></tr></thead><tbody>';
+    '<th title="Mercado onde temos posição aberta">Mercado</th>' +
+    '<th title="Outcome apostado: Yes ou No (lado do mercado)">Outcome</th>' +
+    '<th title="Quantidade de tokens detidos pelo bot">Size</th>' +
+    '<th title="Preço médio ponderado de entrada (todas as compras)">Entry</th>' +
+    '<th title="Preço atual do outcome no mercado (atualiza a cada 30s)">Atual</th>' +
+    '<th title="PnL não-realizado em USD: (preço_atual - entry) × size">PnL $</th>' +
+    '<th title="Variação percentual desde a entrada">PnL %</th>' +
+    '<th title="Tempo até o mercado resolver e definirmos vitória/derrota">Resolve em</th>' +
+    '<th title="Tempo desde que a primeira ordem foi preenchida">Aberta há</th></tr></thead><tbody>';
   for (const p of list) {
     const cls = fmt.pnlClass(p.unrealized_pnl);
     const pctCls = fmt.pnlClass(p.pct_pnl);
@@ -664,9 +691,14 @@ function renderOpenPositionsTable(list) {
 
 function renderClosedPositionsTable(list) {
   let html = '<table class="data-table"><thead><tr>' +
-    '<th>Mercado</th><th>Outcome</th><th>Size</th>' +
-    '<th>Entry</th><th>Resolveu</th><th>Resultado</th>' +
-    '<th>PnL Realizado</th><th>Fechada há</th></tr></thead><tbody>';
+    '<th title="Mercado onde tivemos posição (já resolvido)">Mercado</th>' +
+    '<th title="Outcome apostado: Yes ou No">Outcome</th>' +
+    '<th title="Quantidade de tokens que detínhamos no fechamento">Size</th>' +
+    '<th title="Preço médio ponderado de entrada">Entry</th>' +
+    '<th title="Data/hora em que o mercado resolveu na Polymarket">Resolveu</th>' +
+    '<th title="GANHOU = outcome venceu (recebemos $1/token) / PERDEU = outcome perdeu (zero)">Resultado</th>' +
+    '<th title="Lucro/prejuízo realizado em USD após resolução do mercado">PnL Realizado</th>' +
+    '<th title="Tempo desde o fechamento da posição">Fechada há</th></tr></thead><tbody>';
   for (const p of list) {
     const cls = fmt.pnlClass(p.realized_pnl);
     const title = p.market_title || '—';
