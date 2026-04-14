@@ -19,12 +19,15 @@ from typing import Any
 
 import aiosqlite
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+from src.core.metrics import halted, render_metrics
 
 from src.core.database import DEFAULT_DB_PATH
 from src.core.logger import get_logger
 from src.core.state import InMemoryState
 from src.executor.balance_cache import BalanceCache
+from src.executor.risk_manager import RiskManager
 
 log = get_logger(__name__)
 
@@ -62,10 +65,20 @@ def build_app(
     started_at: datetime,
     mode: str,
     vps_location: str,
+    risk_manager: RiskManager | None = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> FastAPI:
     app = FastAPI(title="polytrader", docs_url=None, redoc_url=None)
     auth = Depends(_auth_dep(secret))
+
+    @app.get("/metrics")
+    async def prometheus_metrics() -> PlainTextResponse:
+        """Prometheus exposition. Atualiza halt gauge antes de expor."""
+        if risk_manager is not None:
+            halted.set(1 if risk_manager.is_halted else 0)
+        return PlainTextResponse(
+            render_metrics(), media_type="text/plain; version=0.0.4",
+        )
 
     @app.get("/health")
     async def health() -> JSONResponse:
@@ -120,6 +133,23 @@ def build_app(
             }
             for r in rows
         ]
+
+    @app.post("/halt", dependencies=[auth])
+    async def halt(reason: str = "manual_override") -> dict[str, Any]:
+        if risk_manager is None:
+            raise HTTPException(status_code=503, detail="risk_manager not wired")
+        risk_manager.halt(reason)
+        log.warning("manual_halt_via_dashboard", reason=reason)
+        return {"halted": True, "reason": reason}
+
+    @app.post("/resume", dependencies=[auth])
+    async def resume() -> dict[str, Any]:
+        if risk_manager is None:
+            raise HTTPException(status_code=503, detail="risk_manager not wired")
+        prev_reason = risk_manager.halt_reason
+        risk_manager.resume()
+        log.warning("manual_resume_via_dashboard", previous_reason=prev_reason)
+        return {"halted": False, "previous_reason": prev_reason}
 
     @app.get("/positions", dependencies=[auth])
     async def positions() -> dict[str, Any]:

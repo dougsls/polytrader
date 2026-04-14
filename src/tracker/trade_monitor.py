@@ -12,6 +12,8 @@ from pathlib import Path
 
 import aiosqlite
 
+from src.core import metrics
+
 from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.api.websocket_client import RTDSClient
@@ -98,5 +100,29 @@ class TradeMonitor:
                 state=self._state,
             )
             if signal:
-                await self._queue.put(signal)
-                log.info("signal_queued", id=signal.id, side=signal.side)
+                # Backpressure non-blocking: em storm, preferimos dropar o
+                # sinal mais ANTIGO (provavelmente irrelevante já) e manter
+                # o novo. Nunca bloqueamos o tracker WS — se travar aqui,
+                # o heartbeat do RTDS morre e perdemos a conexão inteira.
+                try:
+                    self._queue.put_nowait(signal)
+                    metrics.signals_received.inc()
+                    metrics.queue_size.set(self._queue.qsize())
+                    log.info("signal_queued", id=signal.id, side=signal.side)
+                except asyncio.QueueFull:
+                    try:
+                        dropped = self._queue.get_nowait()
+                        self._queue.task_done()
+                        self._queue.put_nowait(signal)
+                        metrics.signals_dropped.inc()
+                        log.warning(
+                            "signal_dropped_due_to_backpressure",
+                            dropped_id=dropped.id, kept_id=signal.id,
+                            qsize=self._queue.qsize(),
+                        )
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
+                        metrics.signals_dropped.inc()
+                        log.warning(
+                            "signal_dropped_due_to_backpressure",
+                            id=signal.id, qsize=self._queue.qsize(),
+                        )

@@ -342,6 +342,7 @@ async def amain() -> None:
         state=state, balance_cache=balance_cache, shared_conn=shared_conn,
         started_at=started_at, mode=settings.config.executor.mode,
         vps_location=settings.env.vps_location,
+        risk_manager=risk,
     )
     uv_config = uvicorn.Config(
         dashboard_app,

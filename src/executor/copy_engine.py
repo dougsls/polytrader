@@ -27,6 +27,7 @@ from src.core.exceptions import (
     SpreadTooWideError,
 )
 from src.core.logger import get_logger
+from src.core import metrics
 from src.core.models import CopyTrade, RiskState, TradeSignal
 from src.core.state import InMemoryState
 from src.executor.order_manager import build_draft
@@ -68,6 +69,9 @@ class CopyEngine:
         self._conn = conn
 
     async def _mark_skipped(self, signal: TradeSignal, reason: str) -> None:
+        # Extrai classe do motivo (prefixo antes do ":") pra label baixa-cardinalidade
+        reason_class = reason.split(":", 1)[0].strip() if ":" in reason else reason
+        metrics.trades_skipped.labels(reason_class=reason_class).inc()
         # Fase 3 LOW — usa shared_conn em vez de abrir conexão nova.
         if self._conn is not None:
             await self._conn.execute(
@@ -168,6 +172,7 @@ class CopyEngine:
                 )
                 await db.commit()
 
+        metrics.trades_executed.inc()
         if self._on_event:
             await self._on_event("executed", signal, trade)
 
@@ -177,6 +182,7 @@ class CopyEngine:
             try:
                 await self.handle_signal(signal)
             except Exception:  # noqa: BLE001 — loop resiliente; crash iso por sinal
+                metrics.errors.labels(source="executor").inc()
                 log.exception("copy_engine_crash", signal_id=signal.id)
             finally:
                 self._queue.task_done()
