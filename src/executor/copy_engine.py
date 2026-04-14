@@ -111,36 +111,54 @@ class CopyEngine:
     async def handle_signal(self, signal: TradeSignal) -> None:
         import time as _t
         _start = _t.perf_counter()
-        # 1. Risk gates
-        decision = self._risk.evaluate(signal, self._risk_state())
-        if not decision.allowed:
-            await self._mark_skipped(signal, f"RISK: {decision.reason}")
-            return
 
-        # 2. Regra 1 + Spread shield (dupla trava pré-submissão)
-        try:
-            ref_price = await check_slippage_or_abort(
-                clob=self._clob,
-                token_id=signal.token_id,
-                side=signal.side,
-                whale_price=signal.price,
-                tolerance_pct=self._cfg.whale_max_slippage_pct,
-                max_spread=self._cfg.max_spread,
-            )
-        except SpreadTooWideError as exc:
-            await self._mark_skipped(
-                signal, f"SPREAD: {exc.spread:.4f} > {exc.max_spread:.4f}"
-            )
-            return
-        except SlippageExceededError as exc:
-            await self._mark_skipped(signal, f"SLIPPAGE: {exc.actual:.4f}")
-            return
-        except PolymarketAPIError as exc:
-            await self._mark_skipped(signal, f"BOOK_FETCH: {exc}")
-            return
+        # PAPER PERFECT MIRROR — bypass total dos filtros (paper observation only)
+        perfect_mirror = (
+            self._cfg.mode != "live"
+            and getattr(self._cfg, "paper_perfect_mirror", False)
+        )
+
+        if perfect_mirror:
+            # Tamanho fixo: usa whale_proportional fórmula direto sem gates.
+            sized = max(self._risk_state().total_portfolio_value, 1.0) \
+                    * self._cfg.proportional_factor
+            sized = min(sized, self._cfg.max_position_usd)
+            class _D:
+                allowed = True
+                reason = "OK"
+                sized_usd = sized
+            decision = _D()
+            ref_price = signal.price  # bypass slippage anchor — usa preço whale
+        else:
+            # 1. Risk gates
+            decision = self._risk.evaluate(signal, self._risk_state())
+            if not decision.allowed:
+                await self._mark_skipped(signal, f"RISK: {decision.reason}")
+                return
+            # 2. Regra 1 + Spread shield
+            try:
+                ref_price = await check_slippage_or_abort(
+                    clob=self._clob,
+                    token_id=signal.token_id,
+                    side=signal.side,
+                    whale_price=signal.price,
+                    tolerance_pct=self._cfg.whale_max_slippage_pct,
+                    max_spread=self._cfg.max_spread,
+                )
+            except SpreadTooWideError as exc:
+                await self._mark_skipped(
+                    signal, f"SPREAD: {exc.spread:.4f} > {exc.max_spread:.4f}"
+                )
+                return
+            except SlippageExceededError as exc:
+                await self._mark_skipped(signal, f"SLIPPAGE: {exc.actual:.4f}")
+                return
+            except PolymarketAPIError as exc:
+                await self._mark_skipped(signal, f"BOOK_FETCH: {exc}")
+                return
 
         # 2.5. H6 — Tag exposure cap (só para BUY; SELL reduz exposure).
-        if signal.side == "BUY" and self._conn is not None:
+        if not perfect_mirror and signal.side == "BUY" and self._conn is not None:
             try:
                 market = await self._gamma.get_market(signal.condition_id)
                 risk_state = self._risk_state()

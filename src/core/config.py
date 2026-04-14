@@ -151,10 +151,12 @@ class ExecutorConfig(_StrictModel):
     sizing_mode: Literal["fixed", "proportional", "kelly", "whale_proportional"]
     fixed_size_usd: float = Field(gt=0)
     proportional_factor: float = Field(gt=0, le=1.0)
-    # whale_proportional: multiplicador da % que a whale apostou do portfolio
-    # dela. 1.0 = espelho exato (se whale arrisca 5% do bank → nós também).
-    # >1.0 = amplificar convicção. <1.0 = atenuar.
+    # whale_proportional: multiplicador da % que a whale apostou.
     whale_sizing_factor: float = Field(gt=0, le=5.0, default=1.0)
+    # Paper-only: BYPASS de TODOS os filtros (slippage/spread/risk/duration/
+    # tag exposure/price band). Cada signal vira fake-fill ao preço EXATO
+    # da whale. Útil pra observar comportamento bruto. NUNCA ative em LIVE.
+    paper_perfect_mirror: bool = False
     max_daily_loss_usd: float = Field(gt=0)
     max_drawdown_pct: float = Field(gt=0, le=1.0)
     min_price: float = Field(gt=0, lt=1)

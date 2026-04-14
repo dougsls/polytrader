@@ -44,10 +44,11 @@ async def _load_market_spec(
 
 
 def _limit_price(ref_price: float, side: str, offset_pct: float) -> float:
-    """Preço limite com offset compensando RTT NY→London ~100ms."""
-    if side == "BUY":
-        return ref_price * (1 + offset_pct)
-    return ref_price * (1 - offset_pct)
+    """Preço limite com offset. Clampado em [0.001, 0.999] — outcomes
+    Polymarket são probabilidades 0-1; valores fora disso são rejeitados
+    pelo CLOB com 400."""
+    raw = ref_price * (1 + offset_pct) if side == "BUY" else ref_price * (1 - offset_pct)
+    return max(0.001, min(raw, 0.999))
 
 
 async def build_draft(
