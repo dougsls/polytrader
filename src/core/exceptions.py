@@ -57,3 +57,18 @@ class SlippageExceededError(PolyTraderError):
         )
         self.actual = actual
         self.tolerance = tolerance
+
+
+class SpreadTooWideError(PolyTraderError):
+    """Escudo de spread: (ask - bid) > max_spread → pool ilíquido, abortar.
+
+    Complementa a Regra 1: slippage compara contra o whale_price; spread
+    compara a qualidade do livro AGORA. Ambos precisam passar.
+    """
+
+    def __init__(self, *, spread: float, max_spread: float) -> None:
+        super().__init__(
+            f"spread {spread:.4f} > max {max_spread:.4f}"
+        )
+        self.spread = spread
+        self.max_spread = max_spread

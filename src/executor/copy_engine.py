@@ -21,7 +21,11 @@ from src.api.clob_client import CLOBClient
 from src.api.gamma_client import GammaAPIClient
 from src.core.config import ExecutorConfig
 from src.core.database import DEFAULT_DB_PATH, get_connection
-from src.core.exceptions import PolymarketAPIError, SlippageExceededError
+from src.core.exceptions import (
+    PolymarketAPIError,
+    SlippageExceededError,
+    SpreadTooWideError,
+)
 from src.core.logger import get_logger
 from src.core.models import CopyTrade, RiskState, TradeSignal
 from src.executor.order_manager import build_draft
@@ -74,7 +78,7 @@ class CopyEngine:
             await self._mark_skipped(signal, f"RISK: {decision.reason}")
             return
 
-        # 2. Regra 1 — Slippage Anchoring
+        # 2. Regra 1 + Spread shield (dupla trava pré-submissão)
         try:
             ref_price = await check_slippage_or_abort(
                 clob=self._clob,
@@ -82,7 +86,13 @@ class CopyEngine:
                 side=signal.side,
                 whale_price=signal.price,
                 tolerance_pct=self._cfg.whale_max_slippage_pct,
+                max_spread=self._cfg.max_spread,
             )
+        except SpreadTooWideError as exc:
+            await self._mark_skipped(
+                signal, f"SPREAD: {exc.spread:.4f} > {exc.max_spread:.4f}"
+            )
+            return
         except SlippageExceededError as exc:
             await self._mark_skipped(signal, f"SLIPPAGE: {exc.actual:.4f}")
             return

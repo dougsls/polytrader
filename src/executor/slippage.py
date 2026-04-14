@@ -13,7 +13,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from src.api.clob_client import CLOBClient
-from src.core.exceptions import SlippageExceededError
+from src.core.exceptions import SlippageExceededError, SpreadTooWideError
 from src.core.logger import get_logger
 
 log = get_logger(__name__)
@@ -43,9 +43,16 @@ async def check_slippage_or_abort(
     side: Literal["BUY", "SELL"],
     whale_price: float,
     tolerance_pct: float,
+    max_spread: float | None = None,
 ) -> float:
-    """Consulta o livro e retorna o preço de referência. Lança
-    SlippageExceededError se o mercado se moveu além da tolerância.
+    """Dupla trava pré-submissão. Retorna o preço de referência ou lança.
+
+    Travas aplicadas nesta ordem:
+      1. **Spread shield** (se `max_spread` fornecido): se ask-bid é
+         maior que o limite, o pool está ilíquido e o preenchimento
+         vai dreno o capital. `SpreadTooWideError`.
+      2. **Regra 1 (Anti-Slippage Anchoring)**: compara best_ask/bid
+         contra whale_price ± tolerance_pct. `SlippageExceededError`.
 
     Por que /book em vez de /midpoint: midpoint esconde spread largo;
     comprar pelo ask é o que vai acontecer na prática.
@@ -53,6 +60,28 @@ async def check_slippage_or_abort(
     if whale_price <= 0:
         raise ValueError("whale_price inválido")
     book = await clob.book(token_id)
+
+    # Trava 1 — Spread shield (só se max_spread configurado). Ambos os
+    # lados devem existir; ausência conta como spread infinito = aborta.
+    if max_spread is not None:
+        try:
+            ask_for_spread = _best_ask_from_book(book)
+            bid_for_spread = _best_bid_from_book(book)
+        except ValueError:
+            log.warning("spread_shield_abort_empty_side", token_id=token_id)
+            raise SpreadTooWideError(
+                spread=float("inf"), max_spread=max_spread,
+            ) from None
+        spread = ask_for_spread - bid_for_spread
+        if spread > max_spread:
+            log.warning(
+                "spread_shield_abort",
+                token_id=token_id, bid=bid_for_spread, ask=ask_for_spread,
+                spread=spread, max_spread=max_spread, side=side,
+            )
+            raise SpreadTooWideError(spread=spread, max_spread=max_spread)
+
+    # Trava 2 — Regra 1 (âncora no whale_price).
     if side == "BUY":
         ref = _best_ask_from_book(book)
         limit = whale_price * (1 + tolerance_pct)

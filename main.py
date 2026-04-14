@@ -27,6 +27,7 @@ from src.core.models import CopyTrade, RiskState, TradeSignal
 from src.core.state import InMemoryState
 from src.executor.balance_cache import BalanceCache
 from src.executor.copy_engine import CopyEngine
+from src.executor.position_sync import reconcile_bot_positions
 from src.executor.risk_manager import RiskManager
 from src.notifier.telegram import TelegramNotifier
 from src.tracker.trade_monitor import TradeMonitor
@@ -101,13 +102,36 @@ async def amain() -> None:
             f"(threshold {settings.env.latency_alert_threshold_ms}ms)"
         )
 
+    # --- clients (criados antes do state pois o sync precisa do data_client) -
+    data_client = DataAPIClient()
+    gamma = GammaAPIClient()
+
     # --- in-memory state cache (Phase 4) ---------------------------------
     state = InMemoryState()
     await state.reload_from_db(conn=shared_conn)
 
-    # --- clients ----------------------------------------------------------
-    data_client = DataAPIClient()
-    gamma = GammaAPIClient()
+    # --- Orphan recovery ANTES de abrir WS (live-trading final check) ----
+    # Se a VPS reiniciou no meio de um fill, o DB local pode estar defasado
+    # em relação à posição on-chain. Pull /positions e reconcilia ANTES de
+    # o tracker começar a emitir sinais de SELL (que consultam state RAM).
+    if settings.env.funder_address:
+        try:
+            stats = await reconcile_bot_positions(
+                data_client=data_client,
+                wallet_address=settings.env.funder_address,
+                conn=shared_conn,
+                state=state,
+            )
+            if stats["added"] or stats["updated"] or stats["closed"]:
+                notifier.notify(
+                    f"🔄 Orphan sync: +{stats['added']} / ~{stats['updated']} "
+                    f"/ ✕{stats['closed']}"
+                )
+        except Exception as exc:  # noqa: BLE001 — não bloquear startup
+            log.error("position_sync_failed", err=repr(exc))
+            notifier.notify(f"⚠️ Position sync falhou no startup: {exc!r}")
+    else:
+        log.warning("position_sync_skipped", reason="funder_address_empty")
 
     # Phase 5 — EOA credentials prefetch. Em paper/dry-run e sem chave,
     # CLOB fica read-only (post_order cairá em NotImplementedError, que o

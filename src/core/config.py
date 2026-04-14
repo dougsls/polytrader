@@ -153,6 +153,8 @@ class ExecutorConfig(_StrictModel):
     avoid_resolved_markets: bool
     # Regra 1 — Anti-Slippage Anchoring
     whale_max_slippage_pct: float = Field(gt=0, le=0.5)
+    # Escudo de spread dinâmico (ask - bid). 0.02 = 2 centavos.
+    max_spread: float = Field(gt=0, le=0.5, default=0.02)
     default_order_type: str
     use_limit_orders: bool
     limit_price_offset: float = Field(ge=0)
