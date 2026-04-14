@@ -135,21 +135,40 @@ class CopyEngine:
                 ) as cur:
                     row = await cur.fetchone()
                 invested_open = float(row[0]) if row else 0.0
+                # Separar lucros (wins) de perdas pra computar cofre.
+                # Cofre acumula 30% dos wins; perdas descontam da banca ativa.
                 async with self._conn.execute(
-                    "SELECT COALESCE(SUM(realized_pnl),0) FROM bot_positions"
+                    "SELECT COALESCE(SUM(CASE WHEN realized_pnl>0 THEN realized_pnl ELSE 0 END),0), "
+                    "       COALESCE(SUM(CASE WHEN realized_pnl<0 THEN realized_pnl ELSE 0 END),0) "
+                    "FROM bot_positions"
                 ) as cur:
                     row = await cur.fetchone()
-                realized = float(row[0]) if row else 0.0
-                cash_available = starting_bank + realized - invested_open
+                positive_realized = float(row[0]) if row else 0.0
+                negative_realized = float(row[1]) if row else 0.0
+                safe_pct = float(getattr(self._cfg, "profit_safe_pct", 0.0) or 0.0)
+                safe_bank = positive_realized * safe_pct
+                active_bank = (starting_bank + positive_realized * (1 - safe_pct)
+                               + negative_realized)
+                cash_available = active_bank - invested_open
+                # Circuit breaker: pausa se banca ativa caiu muito.
+                min_pct = float(getattr(self._cfg, "min_active_bank_pct", 0.0) or 0.0)
+                min_active = starting_bank * min_pct
+                if min_pct > 0 and active_bank < min_active:
+                    await self._mark_skipped(
+                        signal,
+                        f"BANK_DRAWDOWN_PAUSE: ativa ${active_bank:.2f} < min ${min_active:.2f} "
+                        f"(cofre ${safe_bank:.2f} protegido)",
+                    )
+                    return
                 if cash_available < 1.0:
                     await self._mark_skipped(
                         signal,
-                        f"INSUFFICIENT_CASH: ${cash_available:.2f} restante de ${starting_bank:.0f}",
+                        f"INSUFFICIENT_CASH: ${cash_available:.2f} ativa (cofre ${safe_bank:.2f})",
                     )
                     return
-                # Cap cumulativo POR mercado (concentração).
-                current_bank = starting_bank + realized
-                max_per_market = current_bank * float(
+                # Cap cumulativo POR mercado: baseado em banca ATIVA
+                # (sem contar cofre). Cofre não amplia risco.
+                max_per_market = active_bank * float(
                     getattr(self._cfg, "max_position_pct_of_bank", 0.05) or 0.05
                 )
                 async with self._conn.execute(

@@ -226,10 +226,33 @@ def build_app(
             key = sr[0] if sr[0] in ("resolved","sold") else "legacy"
             scoreboard[key] = {"wins": int(sr[1] or 0), "losses": int(sr[2] or 0),
                                "pnl": float(sr[3] or 0.0), "n": int(sr[4] or 0)}
-        # Saldo "demo" dinâmico: starting bank + realized PnL - capital travado em posições
+        # Saldo "demo" dinâmico com lógica de COFRE (preservação de banca).
+        # - Cofre: 30% de cada PnL positivo fica protegido (intocável).
+        # - Banca ativa: starting + 70% dos wins + losses - invested aberto.
         starting_bank = balance_cache.balance_usdc  # paper: max_portfolio_usd
-        cash_available = starting_bank + pnl["realized_total"] - invested_in_positions
-        portfolio_total = cash_available + market_value_positions
+        safe_pct = 0.0
+        min_active_pct = 0.0
+        if risk_manager is not None:
+            cfg = getattr(risk_manager, "_cfg", None)
+            if cfg is not None:
+                safe_pct = float(getattr(cfg, "profit_safe_pct", 0.0) or 0.0)
+                min_active_pct = float(getattr(cfg, "min_active_bank_pct", 0.0) or 0.0)
+        async with shared_conn.execute(
+            "SELECT COALESCE(SUM(CASE WHEN realized_pnl>0 THEN realized_pnl ELSE 0 END),0), "
+            "       COALESCE(SUM(CASE WHEN realized_pnl<0 THEN realized_pnl ELSE 0 END),0) "
+            "FROM bot_positions"
+        ) as cur:
+            r = await cur.fetchone()
+        positive_realized = float(r[0]) if r else 0.0
+        negative_realized = float(r[1]) if r else 0.0
+        safe_bank = positive_realized * safe_pct
+        active_bank = (starting_bank + positive_realized * (1 - safe_pct)
+                       + negative_realized)
+        cash_available = active_bank - invested_in_positions
+        # Portfolio total visível = cofre + ativa + valor de mercado das posições
+        portfolio_total = safe_bank + cash_available + market_value_positions
+        drawdown_paused = (min_active_pct > 0 and
+                           active_bank < starting_bank * min_active_pct)
 
         return {
             "mode": mode,
@@ -238,10 +261,15 @@ def build_app(
             "balance_usdc": balance_cache.balance_usdc,  # back-compat
             "balance_fresh": balance_cache.is_fresh,
             "starting_bank": starting_bank,
+            "safe_bank": safe_bank,
+            "active_bank": active_bank,
             "cash_available": cash_available,
             "invested_in_positions": invested_in_positions,
             "market_value_positions": market_value_positions,
             "portfolio_total": portfolio_total,
+            "drawdown_paused": drawdown_paused,
+            "safe_pct": safe_pct,
+            "min_active_pct": min_active_pct,
             "halted": risk_manager.is_halted if risk_manager else False,
             "halt_reason": risk_manager.halt_reason if risk_manager else None,
             "active_whales": active_whales,

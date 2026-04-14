@@ -87,6 +87,13 @@ executor:
   # Com banca $500: max $25/mercado. Banca cresce p/ $800: max $40.
   # Agressivo: 0.10 (10%). Conservador: 0.03 (3%).
   max_position_pct_of_bank: 0.05
+  # PRESERVAÇÃO DE BANCA (Preset B — Balanceado).
+  # 30% de cada lucro realizado vai pro COFRE (intocável, fora do trading).
+  # Banca ativa = inicial + 70% dos wins + losses. É essa que o bot usa.
+  # Circuit breaker: se ativa cair abaixo de 80% da inicial → pausa BUYs
+  # com motivo BANK_DRAWDOWN_PAUSE. Cofre permanece intacto.
+  profit_safe_pct: 0.30
+  min_active_bank_pct: 0.80
   # Realismo paper (só fazem sentido se perfect_mirror=true).
   # paper_apply_fees 0.01 = deduz 1% por fill (CLOB fee).
   #   Live real cobra 0.5-2% dependendo de maker/taker.

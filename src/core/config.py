@@ -157,6 +157,11 @@ class ExecutorConfig(_StrictModel):
     # tag exposure/price band). Cada signal vira fake-fill ao preço EXATO
     # da whale. Útil pra observar comportamento bruto. NUNCA ative em LIVE.
     paper_perfect_mirror: bool = False
+    # PRESERVAÇÃO DE BANCA — Cofre (30% dos lucros vai pra um bolso
+    # intocável, fora do trading). Circuit breaker pausa BUYs se banca
+    # ativa cair abaixo de X% da inicial (default 80% = drawdown max 20%).
+    profit_safe_pct: float = Field(default=0.0, ge=0.0, le=1.0)
+    min_active_bank_pct: float = Field(default=0.0, ge=0.0, le=1.0)
     # Concentração: cap cumulativo POR mercado (absoluto + % banca).
     # Diferente de max_position_usd que é por-fill. Se whale bombardeia um
     # mercado com 20 trades, sem esse cap a posição acumula sem limite.

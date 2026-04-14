@@ -242,7 +242,7 @@
       border-bottom: 1px solid var(--border);
       padding: var(--s-4) var(--s-5);
       display: grid;
-      grid-template-columns: repeat(5, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
       gap: var(--s-4);
     }
     .hero-kpi {
@@ -563,9 +563,14 @@
 <!-- ============== HERO BAR (sempre visível) ============== -->
 <div class="hero-bar">
   <div class="hero-kpi" id="h-bank">
-    <div class="hero-label">💰 Banca</div>
+    <div class="hero-label">💰 Banca Total</div>
     <div class="hero-value mono" id="v-bank">$—</div>
     <div class="hero-sub" id="v-bank-sub">—</div>
+  </div>
+  <div class="hero-kpi" id="h-safe" style="display:none;">
+    <div class="hero-label">🏦 Cofre (protegido)</div>
+    <div class="hero-value mono" id="v-safe">$—</div>
+    <div class="hero-sub" id="v-safe-sub">—</div>
   </div>
   <div class="hero-kpi" id="h-net">
     <div class="hero-label">📈 Retorno Líquido</div>
@@ -900,14 +905,36 @@ setInterval(tickClock, 1000); tickClock();
 
 /* ============== HERO BAR RENDER ============== */
 function renderHero(ov) {
-  // Banca
+  // Banca Total
   const bank = ov.portfolio_total ?? ov.balance_usdc ?? 0;
   const start = ov.starting_bank ?? ov.balance_usdc ?? 0;
   const delta = bank - start;
   const deltaPct = start > 0 ? (delta / start * 100) : 0;
   $('v-bank').textContent = fmt.usd(bank);
-  $('v-bank-sub').innerHTML = `<span class="${fmt.cls(delta)}">${fmt.arrow(delta)} ${fmt.usdSigned(delta)} · ${fmt.pct(deltaPct, 2)}</span>`;
+  $('v-bank-sub').innerHTML = `<span class="${fmt.cls(delta)}">${fmt.arrow(delta)} ${fmt.usdSigned(delta)} · ${fmt.pct(deltaPct, 2)}</span> · inicial $${start.toFixed(0)}`;
   $('h-bank').className = 'hero-kpi ' + fmt.cls(delta);
+
+  // 🏦 COFRE (só aparece se safe_pct > 0)
+  const safe = ov.safe_bank ?? 0;
+  const active = ov.active_bank ?? bank;
+  const safePct = ov.safe_pct ?? 0;
+  if (safePct > 0) {
+    $('h-safe').style.display = '';
+    $('v-safe').textContent = fmt.usd(safe);
+    $('v-safe').className = 'hero-value mono gain';
+    const minActive = ov.min_active_pct > 0 ? start * ov.min_active_pct : 0;
+    const paused = ov.drawdown_paused;
+    let sub;
+    if (paused) {
+      sub = `<span class="loss">⚠️ pausado · ativa $${active.toFixed(2)} < min $${minActive.toFixed(0)}</span>`;
+    } else {
+      sub = `${(safePct*100).toFixed(0)}% dos lucros · ativa $${active.toFixed(2)}`;
+    }
+    $('v-safe-sub').innerHTML = sub;
+    $('h-safe').className = 'hero-kpi ' + (paused ? 'loss' : 'gain');
+  } else {
+    $('h-safe').style.display = 'none';
+  }
 
   // Retorno líquido
   const realized = ov.pnl?.realized_total ?? 0;
