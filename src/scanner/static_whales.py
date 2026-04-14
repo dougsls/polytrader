@@ -36,6 +36,8 @@ TARGET_WHALES: tuple[tuple[str, str], ...] = (
     ("0xf705fa045201391d9632b7f3cde06a5e24453ca7", "Anon_0xf705"),
     ("0x594edb9112f526fa6a80b8f858a6379c8a2c1c11", "ColdMath"),
     ("0x751a2b86cab503496efd325c8344e10159349ea1", "Sharky6999"),
+    # Top de cripto (adicionado 2026-04-14)
+    ("0xb27bc932bf8110d8f78e55da7d5f0497a18b5b82", "CryptoWhale"),
 )
 
 # Validação no import: todos lowercase + formato 0x+40hex.
