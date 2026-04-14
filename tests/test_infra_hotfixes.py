@@ -51,7 +51,11 @@ async def test_scanner_snapshot_whale_runs_in_parallel(tmp_path: Path):
     async def fake_snapshot(client, addr, *, state):  # noqa: ARG001
         await asyncio.sleep(0.05)
 
-    with patch("src.scanner.scanner.snapshot_whale", new=fake_snapshot):
+    async def fake_enrich(client, profiles):  # noqa: ARG001
+        return profiles  # bypass real API, preserve placeholders
+
+    with patch("src.scanner.scanner.snapshot_whale", new=fake_snapshot), \
+         patch("src.scanner.scanner.enrich_profiles", new=fake_enrich):
         t0 = time.perf_counter()
         await scanner.tick()
         elapsed = time.perf_counter() - t0
