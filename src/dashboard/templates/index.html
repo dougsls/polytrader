@@ -599,8 +599,8 @@ function renderWallets(rows) {
     '<th title="Pseudônimo público da whale na Polymarket">Nome</th>' +
     '<th title="Endereço Ethereum/Polygon da carteira (truncado)">Address</th>' +
     '<th title="Score composto 0-1: combina PnL, win-rate, consistência e diversidade">Score</th>' +
-    '<th title="Lucro/prejuízo total acumulado em USD desde o início do tracking">PnL Total</th>' +
-    '<th title="% de trades lucrativos. Acima de 55% é considerado bom.">Win Rate</th>' +
+    '<th title="⚠️ PnL das top-50 posições lucrativas (Polymarket /closed-positions não expõe perdedoras via API pública). É uma aproximação otimista, use como ordering não como verdade absoluta.">PnL Top*</th>' +
+    '<th title="⚠️ Win-rate nas top-50 lucrativas; sempre ≈100% (API só mostra ganhadoras). Use Score como proxy de qualidade.">Win Rate*</th>' +
     '<th title="Quantidade total de trades executados pela whale">Trades</th>' +
     '<th title="Tempo desde o último trade observado da whale">Último</th>' +
     '<th title="ATIVA = sendo monitorada em tempo real / INATIVA = removida do pool">Status</th></tr></thead><tbody>';

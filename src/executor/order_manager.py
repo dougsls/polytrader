@@ -61,7 +61,12 @@ async def build_draft(
     db_path: Path = DEFAULT_DB_PATH,
 ) -> tuple[OrderDraft, CopyTrade, MarketSpec]:
     spec = await _load_market_spec(signal, gamma)
-    raw_price = _limit_price(ref_price, signal.side, cfg.limit_price_offset)
+    # Em paper_perfect_mirror, reproduzir preço EXATO da whale — sem offset.
+    # Offset de 2% (compensar latência NY→London) só faz sentido em live.
+    # Em paper, offset distorce entry price e gera slippage artificial.
+    offset = 0.0 if (cfg.mode != "live" and getattr(cfg, "paper_perfect_mirror", False)) \
+                 else cfg.limit_price_offset
+    raw_price = _limit_price(ref_price, signal.side, offset)
     # size em tokens = USD alocado / preço
     raw_size = sized_usd / max(raw_price, 0.01)
     draft = build_order(spec, signal.side, raw_price, raw_size)  # type: ignore[arg-type]
