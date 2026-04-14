@@ -61,7 +61,7 @@ executor:
 
   # Teto de capital no primeiro live — representa 10% do portfolio-alvo.
   # Escalar progressivamente para 500 após 3-5 dias de live cauteloso.
-  max_portfolio_usd: 50
+  max_portfolio_usd: 200
   # Paper testing: teto POR posição = 20% da banca. Evita estourar
   # max_portfolio_usd com uma única ordem. Em live, ajustar proporcional.
   max_position_usd: 10
