@@ -92,18 +92,23 @@ async def apply_fill(
                 log.warning("sell_without_position", token_id=signal.token_id)
                 return
             old_size = float(row[1])
+            old_avg = float(row[2])
             new_size = old_size - executed_size
+            # PnL realizado deste fill: (preço de venda - entry médio) × tokens vendidos.
+            # Acumula em realized_pnl pra somar parciais ao longo do tempo.
+            sell_pnl = (executed_price - old_avg) * executed_size
             if new_size <= _EPS:
                 await db.execute(
                     "UPDATE bot_positions SET size=0, is_open=0, "
-                    "closed_at=?, updated_at=?, current_price=? WHERE id=?",
-                    (now, now, executed_price, row[0]),
+                    "closed_at=?, updated_at=?, current_price=?, "
+                    "realized_pnl=COALESCE(realized_pnl,0)+? WHERE id=?",
+                    (now, now, executed_price, sell_pnl, row[0]),
                 )
             else:
                 await db.execute(
-                    "UPDATE bot_positions SET size=?, current_price=?, updated_at=? "
-                    "WHERE id=?",
-                    (new_size, executed_price, now, row[0]),
+                    "UPDATE bot_positions SET size=?, current_price=?, updated_at=?, "
+                    "realized_pnl=COALESCE(realized_pnl,0)+? WHERE id=?",
+                    (new_size, executed_price, now, sell_pnl, row[0]),
                 )
 
         await db.execute(

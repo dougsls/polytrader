@@ -83,14 +83,43 @@ class GammaAPIClient:
             "closed": bool(row["closed"]) if row["closed"] is not None else None,
             "resolved": bool(row["resolved"]) if row["resolved"] is not None else None,
             "tokens_json": row["tokens_json"],
+            "tokens": orjson.loads(row["tokens_json"]) if row["tokens_json"] else [],
             "tick_size": row["tick_size"],
             "neg_risk": bool(row["neg_risk"]),
             "_cached": True,
         }
 
+    @staticmethod
+    def _normalize_tokens(market: dict[str, Any]) -> list[dict[str, Any]]:
+        """Gamma 2026 retorna outcomes/clobTokenIds como JSON-strings paralelas;
+        signal_detector + order_manager esperam shape CLOB: [{token_id, outcome}].
+        """
+        existing = market.get("tokens")
+        if isinstance(existing, list) and existing:
+            return existing
+        outs = market.get("outcomes")
+        ids = market.get("clobTokenIds")
+        if isinstance(outs, str):
+            try:
+                outs = orjson.loads(outs)
+            except Exception:
+                outs = None
+        if isinstance(ids, str):
+            try:
+                ids = orjson.loads(ids)
+            except Exception:
+                ids = None
+        if not isinstance(outs, list) or not isinstance(ids, list):
+            return []
+        return [
+            {"token_id": str(tid), "outcome": str(name)}
+            for tid, name in zip(ids, outs, strict=False)
+        ]
+
     async def _write_cache(self, condition_id: str, market: dict[str, Any]) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        tokens_json = orjson.dumps(market.get("tokens", [])).decode()
+        market["tokens"] = self._normalize_tokens(market)
+        tokens_json = orjson.dumps(market["tokens"]).decode()
         tick_size = market.get("minimum_tick_size") or market.get("tick_size") or 0.01
         neg_risk = 1 if market.get("neg_risk") or market.get("negRisk") else 0
         async with get_connection(self._db_path) as db:
