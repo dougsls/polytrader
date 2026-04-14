@@ -458,17 +458,24 @@ function renderHero(ov) {
         • <b>Sinais 24h</b> = tráfego de whales nas últimas 24h.
       `;
     } else if (opens > 0) {
+      const sb = ov.scoreboard || {};
+      const res = sb.resolved || {wins:0,losses:0,pnl:0,n:0};
+      const sold = sb.sold || {wins:0,losses:0,pnl:0,n:0};
+      const scoreLine = (res.n + sold.n) > 0
+        ? `<div style="margin-top:10px;padding:10px;background:var(--panel3);border-radius:6px;font-size:12px;">
+            🏁 <b>Placar:</b> 🏆 <b class="positive">${res.wins} ganhas</b> (<span class="positive mono">+${fmt.usd(Math.abs(res.pnl > 0 ? res.pnl : 0))}</span>) · ❌ <b class="negative">${res.losses} perdidas</b> (<span class="negative mono">-${fmt.usd(Math.abs(res.pnl < 0 ? Math.abs(res.pnl) : 0))}</span>) · 💱 ${sold.n} vendidas (<span class="mono ${fmt.pnlClass(sold.pnl)}">${fmt.pnlPrefix(sold.pnl)}${fmt.usd(sold.pnl)}</span>)
+          </div>`
+        : `<div style="margin-top:10px;padding:10px;background:var(--panel3);border-radius:6px;font-size:12px;color:var(--muted);">
+            🏁 <b>Nenhuma posição resolvida ainda.</b> Mercados resolvem em horas conforme jogos/eventos acabam. Resolution watcher verifica a cada 5min.
+          </div>`;
       explain.innerHTML = `
         <b class="${unrealClass}">${fmt.pnlPrefix(pnl.unrealized)}${fmt.usd(pnl.unrealized)}</b> PnL latente em
         <b>${opens}</b> ${opens === 1 ? 'posição aberta' : 'posições abertas'} ·
         <b class="${realClass}">${fmt.pnlPrefix(pnl.realized_total)}${fmt.usd(pnl.realized_total)}</b> realizado ·
         <b>${execs}</b> ${execs !== 1 ? 'ordens' : 'ordem'} 24h ·
         <b>${skips}</b> skip${skips !== 1 ? 's' : ''}
-        <br><br>
-        📌 Abra <b>Posições</b> pra ver cada aposta com preço atual, % PnL, e <b>quanto falta pra resolver</b>.
-        Preços atualizam a cada 30s via CLOB. Resolução é checada a cada 5min.
-        Quando o mercado fechar (alcançar end_date), o bot marca automaticamente
-        GANHOU ou PERDEU e grava o PnL realizado.
+        ${scoreLine}
+        <div style="margin-top:8px;">📌 Abra <b>Posições</b> pra ver cada aposta com PnL latente e o <b>Placar</b> completo de resolvidas vs vendidas.</div>
       `;
     } else {
       explain.innerHTML = `
@@ -782,11 +789,46 @@ function renderPositions(data) {
     html += renderOpenPositionsTable(openList);
   }
   if (closedList.length) {
-    const wins = closedList.filter(p => p.outcome_result === 'won').length;
-    const losses = closedList.filter(p => p.outcome_result === 'lost').length;
+    // Separa por close_reason: resolved (mercado decidiu) vs sold (whale vendeu)
+    const resolved = closedList.filter(p => p.close_reason === 'resolved');
+    const sold = closedList.filter(p => p.close_reason === 'sold');
+    const legacy = closedList.filter(p => !p.close_reason);
+    const wins = resolved.filter(p => p.outcome_result === 'won');
+    const losses = resolved.filter(p => p.outcome_result === 'lost');
+    const winsPnl = wins.reduce((s, p) => s + (p.realized_pnl || 0), 0);
+    const lossesPnl = losses.reduce((s, p) => s + (p.realized_pnl || 0), 0);
+    const soldPnl = sold.reduce((s, p) => s + (p.realized_pnl || 0), 0);
     const totalR = closedList.reduce((s, p) => s + (p.realized_pnl || 0), 0);
-    const wrPct = wins + losses > 0 ? (wins / (wins + losses) * 100).toFixed(0) + '%' : '—';
-    html += `<div style="padding:10px 14px;background:var(--panel3);border-bottom:1px solid var(--border-soft);border-top:1px solid var(--border);font-size:11px;letter-spacing:0.5px;text-transform:uppercase;color:var(--muted);font-weight:600;"><b>🏁 ${closedList.length} resolvidas</b> — <span class="positive">${wins} ganhas</span> · <span class="negative">${losses} perdidas</span> · WR ${wrPct} · PnL total <span class="${fmt.pnlClass(totalR)}">${fmt.pnlPrefix(totalR)}${fmt.usd(totalR)}</span></div>`;
+    const wrPct = wins.length + losses.length > 0
+      ? (wins.length / (wins.length + losses.length) * 100).toFixed(0) + '%' : '—';
+
+    // Painel de resumo grande e explícito
+    html += `<div style="padding:14px 18px;background:linear-gradient(90deg,var(--panel3),var(--panel2));border-top:1px solid var(--border);border-bottom:2px solid var(--border-soft);">
+      <div style="font-size:13px;font-weight:700;color:var(--fg);margin-bottom:10px;">🏁 Placar das ${closedList.length} Posições Fechadas</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;font-size:12px;">
+        <div style="padding:10px;background:var(--panel2);border-left:3px solid #33d39f;border-radius:4px;">
+          <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:0.6px;">🏆 Resolvidas — Ganhas</div>
+          <div style="font-size:18px;font-weight:700;" class="positive">${wins.length}</div>
+          <div class="mono positive">${fmt.pnlPrefix(winsPnl)}${fmt.usd(winsPnl)}</div>
+        </div>
+        <div style="padding:10px;background:var(--panel2);border-left:3px solid #ff6b6b;border-radius:4px;">
+          <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:0.6px;">❌ Resolvidas — Perdidas</div>
+          <div style="font-size:18px;font-weight:700;" class="negative">${losses.length}</div>
+          <div class="mono negative">${fmt.pnlPrefix(lossesPnl)}${fmt.usd(lossesPnl)}</div>
+        </div>
+        <div style="padding:10px;background:var(--panel2);border-left:3px solid #8899aa;border-radius:4px;">
+          <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:0.6px;">💱 Vendidas (whale fez scalping)</div>
+          <div style="font-size:18px;font-weight:700;color:var(--fg);">${sold.length}</div>
+          <div class="mono ${fmt.pnlClass(soldPnl)}">${fmt.pnlPrefix(soldPnl)}${fmt.usd(soldPnl)}</div>
+        </div>
+        <div style="padding:10px;background:var(--panel2);border-left:3px solid #4ea3ff;border-radius:4px;">
+          <div style="color:var(--muted);font-size:10px;text-transform:uppercase;letter-spacing:0.6px;">📊 Net Total Realizado</div>
+          <div style="font-size:18px;font-weight:700;" class="${fmt.pnlClass(totalR)}">${fmt.pnlPrefix(totalR)}${fmt.usd(totalR)}</div>
+          <div style="font-size:10px;color:var(--muted);">Win-rate (resolvidas): ${wrPct}</div>
+        </div>
+      </div>
+      ${legacy.length ? `<div style="margin-top:8px;font-size:10px;color:var(--muted);">⚠️ ${legacy.length} fechadas sem categoria (antes da migração 003) — não contam no placar.</div>` : ''}
+    </div>`;
     html += renderClosedPositionsTable(closedList);
   }
   el.innerHTML = html;

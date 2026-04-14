@@ -198,6 +198,22 @@ def build_app(
             row = await cur.fetchone()
         invested_in_positions = float(row[0]) if row else 0.0
         market_value_positions = float(row[1]) if row else 0.0
+        # Placar por categoria de fechamento (só 'resolved' conta ganho/perda real)
+        async with shared_conn.execute(
+            "SELECT close_reason, "
+            "       SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) AS wins, "
+            "       SUM(CASE WHEN realized_pnl<0 THEN 1 ELSE 0 END) AS losses, "
+            "       COALESCE(SUM(realized_pnl), 0) AS pnl, COUNT(*) AS n "
+            "FROM bot_positions WHERE is_open=0 GROUP BY close_reason"
+        ) as cur:
+            scoreboard_rows = await cur.fetchall()
+        scoreboard = {"resolved": {"wins":0,"losses":0,"pnl":0.0,"n":0},
+                      "sold": {"wins":0,"losses":0,"pnl":0.0,"n":0},
+                      "legacy": {"wins":0,"losses":0,"pnl":0.0,"n":0}}
+        for sr in scoreboard_rows:
+            key = sr[0] if sr[0] in ("resolved","sold") else "legacy"
+            scoreboard[key] = {"wins": int(sr[1] or 0), "losses": int(sr[2] or 0),
+                               "pnl": float(sr[3] or 0.0), "n": int(sr[4] or 0)}
         # Saldo "demo" dinâmico: starting bank + realized PnL - capital travado em posições
         starting_bank = balance_cache.balance_usdc  # paper: max_portfolio_usd
         cash_available = starting_bank + pnl["realized_total"] - invested_in_positions
@@ -221,6 +237,7 @@ def build_app(
             "whale_inventory_entries": len(state.whale_inventory),
             "pnl": pnl,
             "signals_24h": signal_counts,
+            "scoreboard": scoreboard,
         }
 
     @app.get("/api/wallets", dependencies=[auth])
@@ -277,7 +294,7 @@ def build_app(
             "WHERE bp.is_open=1 "
             "   OR (bp.is_open=0 AND bp.closed_at >= datetime('now', '-30 days')) "
             "ORDER BY bp.is_open DESC, COALESCE(bp.closed_at, bp.opened_at) DESC "
-            "LIMIT 100"
+            "LIMIT 500"
         )
         async with shared_conn.execute(sql) as cur:
             rows = await cur.fetchall()
