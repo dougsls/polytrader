@@ -38,6 +38,9 @@ async def init_database(db_path: Path = DEFAULT_DB_PATH) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(db_path) as db:
         await db.execute("PRAGMA journal_mode=WAL;")
+        # Limita crescimento do .db-wal: checkpoint a cada 500 pages
+        # (~2MB). Evita que o WAL file inche em semanas de uptime 24/7.
+        await db.execute("PRAGMA wal_autocheckpoint=500;")
         await db.execute("PRAGMA foreign_keys=ON;")
         applied = await _applied_versions(db)
         for version, path in _discover_migrations():

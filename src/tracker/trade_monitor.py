@@ -53,12 +53,16 @@ class TradeMonitor:
         self._seen_max_size = 50_000
 
     def _dedup_key(self, trade: dict) -> tuple[str, str, str, str, int]:
+        # Fallback time.monotonic_ns() garante unicidade quando o feed
+        # (replay ou payload seco) não traz timestamp — sem isso, trades
+        # sem ts viram todos (…, 0) e colidem como duplicatas.
+        ts = trade.get("timestamp") or trade.get("time") or time.monotonic_ns()
         return (
             trade.get("maker") or trade.get("user") or "",
             trade.get("conditionId") or trade.get("condition_id") or "",
             trade.get("asset") or trade.get("tokenId") or "",
             (trade.get("side") or "").upper(),
-            int(trade.get("timestamp") or trade.get("time") or 0),
+            int(ts),
         )
 
     def _remember(self, key: tuple[str, str, str, str, int]) -> None:

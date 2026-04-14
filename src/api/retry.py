@@ -12,7 +12,6 @@ Uso:
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Awaitable, Callable
 from functools import wraps
 from typing import Any, TypeVar
@@ -20,8 +19,9 @@ from typing import Any, TypeVar
 import httpx
 
 from src.core.exceptions import EngineRestart425Error
+from src.core.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
@@ -59,7 +59,7 @@ def retry_on_425(
                     if attempt == max_attempts:
                         break
                     logger.warning(
-                        "clob_425_restart attempt=%d delay=%.2fs", attempt, delay
+                        "clob_425_restart", attempt=attempt, delay=delay,
                     )
                     await asyncio.sleep(delay)
                     delay = min(delay * 2, max_delay)

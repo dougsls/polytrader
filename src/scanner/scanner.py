@@ -80,12 +80,20 @@ class Scanner:
             self._scores[profile.address] = score
 
         # --- Snapshot de posições para carteiras NOVAS (Regra 2 warm-up) ---
+        # Em paralelo: 20 carteiras × 200ms NY→London em série = 4s bloqueando
+        # o primeiro tick. `return_exceptions=True` garante que uma falha não
+        # aborta o resto.
         newly_added = new_addresses - previous
-        for addr in newly_added:
-            try:
-                await snapshot_whale(self._data, addr, state=self._state)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("whale_snapshot_failed", addr=addr[:12], err=repr(exc))
+        if newly_added:
+            results = await asyncio.gather(
+                *[snapshot_whale(self._data, a, state=self._state) for a in newly_added],
+                return_exceptions=True,
+            )
+            for addr, res in zip(newly_added, results, strict=False):
+                if isinstance(res, Exception):
+                    log.warning(
+                        "whale_snapshot_failed", addr=addr[:12], err=repr(res),
+                    )
 
         log.info(
             "scanner_tick_done",

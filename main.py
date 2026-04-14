@@ -240,6 +240,44 @@ async def amain() -> None:
         "rs": await build_risk_state(balance_cache=balance_cache, conn=shared_conn)
     }
 
+    async def reconcile_loop() -> None:
+        """Reconcilia bot_positions vs on-chain a cada 30min (live-only).
+
+        Startup já faz 1 reconcile; esta task cobre drift cumulativo de
+        apply_fill falhos silenciosamente ou fills vindos do user-channel
+        do CLOB que não foram capturados pelo pipeline local.
+        """
+        if settings.config.executor.mode != "live":
+            return
+        if not settings.env.funder_address:
+            return
+        interval = 30 * 60  # 30 minutos
+        while not shutdown.is_set():
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+            if shutdown.is_set():
+                break
+            try:
+                stats = await reconcile_bot_positions(
+                    data_client=data_client,
+                    wallet_address=settings.env.funder_address,
+                    conn=shared_conn,
+                    state=state,
+                )
+                if stats["added"] or stats["updated"] or stats["closed"]:
+                    notifier.notify(
+                        f"🔄 Periodic reconcile: +{stats['added']} / "
+                        f"~{stats['updated']} / ✕{stats['closed']}"
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("periodic_reconcile_failed", err=repr(exc))
+
+    # Estado de alerta do balance cache — evita spam de notificação
+    # (dispara 1x ao envelhecer, 1x ao recuperar).
+    balance_stale_alerted = {"v": False}
+
     async def refresh_risk_state() -> None:
         while not shutdown.is_set():
             try:
@@ -248,6 +286,25 @@ async def amain() -> None:
                 )
             except Exception as exc:  # noqa: BLE001
                 log.warning("risk_state_refresh_failed", err=repr(exc))
+
+            # LOW 3 — balance cache stale = portfolio vira 0 → todos
+            # trades viram PORTFOLIO_CAP sem aviso. Alerta assim que
+            # detectado e reseta no recovery.
+            age = balance_cache.age()
+            stale = (not balance_cache.is_fresh) or (
+                age is not None and age.total_seconds() > 300
+            )
+            if stale and not balance_stale_alerted["v"]:
+                age_s = f"{age.total_seconds():.0f}s" if age else "never"
+                notifier.notify(
+                    f"🚨 Balance cache estagnado (age={age_s}). "
+                    "RiskState vai zerar portfolio e bloquear trades por PORTFOLIO_CAP."
+                )
+                balance_stale_alerted["v"] = True
+            elif not stale and balance_stale_alerted["v"]:
+                notifier.notify("✅ Balance cache recuperado.")
+                balance_stale_alerted["v"] = False
+
             try:
                 await asyncio.wait_for(shutdown.wait(), timeout=15.0)
             except asyncio.TimeoutError:
@@ -281,6 +338,7 @@ async def amain() -> None:
         asyncio.create_task(engine.run_loop(), name="copy-engine"),
         asyncio.create_task(balance_cache.run_loop(), name="balance-cache"),
         asyncio.create_task(refresh_risk_state(), name="risk-state-refresh"),
+        asyncio.create_task(reconcile_loop(), name="reconcile-loop"),
         asyncio.create_task(
             latency_monitor_loop(
                 shutdown,
@@ -306,6 +364,17 @@ async def amain() -> None:
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+
+    # HIGH 1 — cancela GTC orders abertas ANTES de fechar a conexão para
+    # evitar ordens-zumbi executando sem supervisão após systemctl stop.
+    if settings.config.executor.mode == "live" and clob._signed is not None:
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, clob._signed.cancel_all)
+            log.info("open_orders_cancelled_on_shutdown")
+        except Exception as exc:  # noqa: BLE001 — não bloquear shutdown
+            log.error("cancel_all_failed_on_shutdown", err=repr(exc))
+
     await shared_conn.close()
     await close_http_client()
     notifier.notify("🔴 PolyTrader offline")
