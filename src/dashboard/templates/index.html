@@ -1158,7 +1158,8 @@ function renderLedger() {
     if (p.is_open) { rowClass = 'row-open'; statusBadge = '<span class="badge accent"><span class="dot"></span>ABERTA</span>'; }
     else if (p.close_reason === 'resolved') {
       if (p.outcome_result === 'won') { rowClass = 'row-win'; statusBadge = '<span class="badge gain">✓ GANHOU</span>'; }
-      else { rowClass = 'row-loss'; statusBadge = '<span class="badge loss">✕ PERDEU</span>'; }
+      else if (p.outcome_result === 'lost') { rowClass = 'row-loss'; statusBadge = '<span class="badge loss">✕ PERDEU</span>'; }
+      else { statusBadge = '<span class="badge warn" title="Comprou no topo (entry=1.0 ou 0.0); preço resolveu igual → PnL=0. Não conta como win nem loss.">≈ BREAK-EVEN</span>'; }
     } else if (p.close_reason === 'sold') {
       statusBadge = '<span class="badge info">💱 VENDIDA</span>';
     } else { statusBadge = '<span class="badge">—</span>'; }
@@ -1276,14 +1277,16 @@ async function openDrawer(pid) {
     const d = await api('/api/position/' + pid);
     const p = d.position;
     const endDate = d.market?.end_date;
-    const isWin = !p.is_open && p.close_reason === 'resolved' && p.realized_pnl > 0;
-    const isLoss = !p.is_open && p.close_reason === 'resolved' && p.realized_pnl < 0;
+    const isWin = !p.is_open && p.close_reason === 'resolved' && p.realized_pnl > 0.005;
+    const isLoss = !p.is_open && p.close_reason === 'resolved' && p.realized_pnl < -0.005;
+    const isNeutral = !p.is_open && p.close_reason === 'resolved' && Math.abs(p.realized_pnl || 0) <= 0.005;
     const isSold = p.close_reason === 'sold';
     const statusBadge = p.is_open
       ? '<span class="badge accent"><span class="dot"></span>ABERTA</span>'
       : (isWin ? '<span class="badge gain">✓ GANHOU</span>'
         : (isLoss ? '<span class="badge loss">✕ PERDEU</span>'
-          : (isSold ? '<span class="badge info">💱 VENDIDA</span>' : '<span class="badge">—</span>')));
+          : (isNeutral ? '<span class="badge warn">≈ BREAK-EVEN</span>'
+            : (isSold ? '<span class="badge info">💱 VENDIDA</span>' : '<span class="badge">—</span>'))));
     const pnl = p.is_open ? (p.unrealized_pnl || 0) : (p.realized_pnl || 0);
     const maxGain = (p.size || 0) * (1 - (p.avg_entry_price || 0));
     const risk = (p.size || 0) * (p.avg_entry_price || 0);

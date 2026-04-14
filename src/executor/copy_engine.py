@@ -127,14 +127,21 @@ class CopyEngine:
             starting_bank = float(self._cfg.max_portfolio_usd)
             cash_available = starting_bank
             if signal.side == "BUY" and self._conn is not None:
+                # Invested = só posições ABERTAS (capital ainda travado).
+                # Realized = todas (fechadas creditam de volta no cash).
+                # Bug anterior: somava size*avg_entry de TODAS, inclusive
+                # fechadas, penalizando duas vezes o capital já liberado.
                 async with self._conn.execute(
-                    "SELECT COALESCE(SUM(size*avg_entry_price),0), "
-                    "       COALESCE(SUM(realized_pnl),0) "
-                    "FROM bot_positions"
+                    "SELECT COALESCE(SUM(size*avg_entry_price),0) "
+                    "FROM bot_positions WHERE is_open=1"
                 ) as cur:
                     row = await cur.fetchone()
                 invested_open = float(row[0]) if row else 0.0
-                realized = float(row[1]) if row else 0.0
+                async with self._conn.execute(
+                    "SELECT COALESCE(SUM(realized_pnl),0) FROM bot_positions"
+                ) as cur:
+                    row = await cur.fetchone()
+                realized = float(row[0]) if row else 0.0
                 cash_available = starting_bank + realized - invested_open
                 # Mínimo Polymarket: $1. Se cash < $1, skip com razão clara.
                 if cash_available < 1.0:

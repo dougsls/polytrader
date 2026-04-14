@@ -635,12 +635,24 @@ def build_app(
             outcome_result = None
             if not is_open:
                 if close_reason == "resolved":
-                    outcome_result = "won" if realized > 0 else "lost"
+                    # 'neutral' = break-even (comprou quando mercado já tinha
+                    # resolvido, pagou e recebeu mesmo valor). Não conta como
+                    # win nem como loss. Ex: whale copy-trade em topo (1.0→1.0).
+                    if realized > 0.005:
+                        outcome_result = "won"
+                    elif realized < -0.005:
+                        outcome_result = "lost"
+                    else:
+                        outcome_result = "neutral"
                 elif close_reason == "sold":
-                    outcome_result = "sold"  # whale vendeu, bot copiou
+                    outcome_result = "sold"
                 else:
-                    # Legacy positions sem close_reason: inferir por PnL
-                    outcome_result = "won" if realized > 0 else ("lost" if realized < 0 else "sold")
+                    if realized > 0.005:
+                        outcome_result = "won"
+                    elif realized < -0.005:
+                        outcome_result = "lost"
+                    else:
+                        outcome_result = "neutral"
             item = {
                 "id": r[0], "condition_id": r[1], "token_id": r[2],
                 "market_title": r[3], "outcome": r[4],
