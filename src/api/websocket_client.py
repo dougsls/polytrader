@@ -61,7 +61,7 @@ class RTDSClient:
 
     async def _on_ping_fail(self) -> None:
         log.warning("rtds_ping_failed_restart_stream")
-        if self._ws is not None and not (self._ws.state.name in ("CLOSED", "CLOSING")):
+        if self._ws is not None and self._ws.state.name not in ("CLOSED", "CLOSING"):
             await self._ws.close()
 
     async def stream(self) -> AsyncIterator[dict[str, Any]]:
@@ -124,5 +124,5 @@ class RTDSClient:
 
     async def close(self) -> None:
         self._stop.set()
-        if self._ws is not None and not (self._ws.state.name in ("CLOSED", "CLOSING")):
+        if self._ws is not None and self._ws.state.name not in ("CLOSED", "CLOSING"):
             await self._ws.close()

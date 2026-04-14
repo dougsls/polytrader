@@ -20,7 +20,7 @@ from src.api.balance import USDCBalanceFetcher
 from src.api.clob_client import CLOBClient
 from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
-from src.api.http import close_http_client
+from src.api.http import close_http_client, prewarm_connections
 from src.api.startup_checks import check_geoblock, latency_baseline
 from src.api.websocket_client import RTDSClient
 from src.core.config import get_settings
@@ -157,6 +157,10 @@ async def amain() -> None:
             f"⚠️ Latência alta no startup: CLOB={clob_rtt:.0f}ms "
             f"(threshold {settings.env.latency_alert_threshold_ms}ms)"
         )
+
+    # Pre-warm connection pool — estabelece TCP+TLS em cada endpoint
+    # ANTES do primeiro signal virar ordem. Elimina cold-start spike.
+    await prewarm_connections()
 
     # --- clients (criados antes do state pois o sync precisa do data_client) -
     data_client = DataAPIClient()
