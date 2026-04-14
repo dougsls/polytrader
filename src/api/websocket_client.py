@@ -102,7 +102,9 @@ class RTDSClient:
                             or (msg.get("payload") or {}).get("maker")
                             or (msg.get("data") or {}).get("maker")
                         )
-                        if maker not in self._tracked:
+                        # Normaliza para lowercase — TARGET_WHALES é sempre
+                        # lowercase; RTDS às vezes devolve checksum case.
+                        if maker is None or maker.lower() not in self._tracked:
                             continue
                         inner = msg.get("payload") or msg.get("data")
                         effective = inner if isinstance(inner, dict) and "maker" in inner else msg

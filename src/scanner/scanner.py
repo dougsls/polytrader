@@ -1,16 +1,17 @@
-"""Scanner — loop periódico que mantém o pool de carteiras vivo.
+"""Scanner — mantém o pool de whales alvo.
 
-Fluxo por ciclo (default 60min):
-    1. fetch_candidates(leaderboard de 7d + 30d) → WalletProfiles
-    2. WalletPool.rank(profiles) → top-N (aplica Regra 3 wash filter)
-    3. WalletPool.sync(ranked) → persiste + muta active_wallets IN PLACE
-    4. snapshot_whale(data_client, addr, state) para carteiras NOVAS
-       → popula whale_inventory em RAM para habilitar Regra 2 (Exit Syncing)
-    5. Atualiza wallet_scores dict IN PLACE (consumido pelo TradeMonitor)
+Desde 2026-04, Polymarket removeu o endpoint `/leaderboard`. O Scanner
+opera em modo **static whitelist** — lê TARGET_WHALES de
+`src/scanner/static_whales.py` e mergeia com `config.yaml:
+scanner.manual_whitelist` (para overrides do operador).
 
-Design: `active_wallets` e `wallet_scores` são **referências vivas** compartilhadas
-com RTDSClient e TradeMonitor. NUNCA reatribuir — mutação in-place preserva
-identidade do objeto.
+Fluxo por ciclo:
+    1. Carrega 22 whales hardcoded + manual_whitelist (config)
+    2. WalletPool.sync → persiste em tracked_wallets, muta active_wallets
+    3. snapshot_whale em paralelo para cada whale nova (Regra 2 warm-up)
+
+`active_wallets` e `wallet_scores` são mutados **in-place** para manter
+identidade da referência usada pelo RTDSClient e TradeMonitor.
 """
 from __future__ import annotations
 
@@ -21,8 +22,8 @@ from src.api.data_client import DataAPIClient
 from src.core.config import ScannerConfig
 from src.core.logger import get_logger
 from src.core.state import InMemoryState
-from src.scanner.leaderboard import fetch_candidates
 from src.scanner.profiler import WalletProfile
+from src.scanner.static_whales import static_whale_profiles
 from src.scanner.wallet_pool import WalletPool
 from src.tracker.whale_inventory import snapshot_whale
 
@@ -48,19 +49,14 @@ class Scanner:
         self._state = state
         self._stop = asyncio.Event()
 
-    def _profiles_from_whitelist(self) -> list[WalletProfile]:
-        """Gera WalletProfile sintéticos de endereços manuais.
-
-        Usado quando o leaderboard da Polymarket Data API está indisponível
-        (ex: endpoint removido em 2026). Scores são constantes 1.0 — não
-        passam pelos gates do scorer. O pool trata como top ranqueado.
-        """
+    def _profiles_from_manual_whitelist(self) -> list[WalletProfile]:
+        """Merge: addresses extras vindos de config.yaml.manual_whitelist."""
         now = datetime.now(timezone.utc)
         return [
             WalletProfile(
-                address=addr, name=None,
-                pnl_usd=10_000.0, volume_usd=50_000.0,
-                win_rate=0.70, total_trades=50, distinct_markets=10,
+                address=addr.lower(), name=None,
+                pnl_usd=50_000.0, volume_usd=250_000.0,
+                win_rate=0.70, total_trades=100, distinct_markets=15,
                 short_term_trade_ratio=0.80,
                 last_trade_at=now - timedelta(hours=1),
             )
@@ -68,38 +64,24 @@ class Scanner:
         ]
 
     async def tick(self) -> None:
-        """Um ciclo de scan — útil pra chamar no startup + no loop."""
-        try:
-            profiles = await fetch_candidates(
-                self._data,
-                periods=self._cfg.leaderboard_periods,
-                short_term_threshold_hours=self._cfg.short_term_threshold_hours,
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.error("scanner_fetch_failed", err=repr(exc))
-            profiles = []
+        """Um ciclo de scan — sempre sincroniza a static whitelist."""
+        profiles: list[WalletProfile] = list(static_whale_profiles())
 
-        # Fallback — merge whitelist manual quando leaderboard vazia/falha.
-        if not profiles and self._cfg.manual_whitelist:
-            log.info(
-                "scanner_using_manual_whitelist",
-                count=len(self._cfg.manual_whitelist),
-            )
-            profiles = self._profiles_from_whitelist()
+        # Mergeia manual_whitelist (se o operador adicionar addresses extras),
+        # deduplicando por address lowercase.
+        if self._cfg.manual_whitelist:
+            seen = {p.address for p in profiles}
+            for extra in self._profiles_from_manual_whitelist():
+                if extra.address not in seen:
+                    profiles.append(extra)
+                    seen.add(extra.address)
 
         ranked = self._pool.rank(profiles)
 
-        # Safety: Rate-limit ou erro transiente zera `profiles`. Se
-        # fizermos sync com ranked=[], TODAS as carteiras ativas viram
-        # is_active=0 e o bot perde 1h de operação. Preserva pool atual.
-        if not ranked and not profiles:
-            log.warning("scanner_empty_result_skipping_sync", active=len(self._active))
-            return
-
         previous = set(self._active)
-        await self._pool.sync(ranked)  # muta self._pool.active_addresses in-place
+        await self._pool.sync(ranked)  # muta self._pool.active_addresses
 
-        # --- Propaga para os dicts vivos (in-place, preserva identidade) ---
+        # --- Propaga para as referências vivas (in-place) ---
         new_addresses = self._pool.active_addresses
         self._active.clear()
         self._active.update(new_addresses)
@@ -108,10 +90,7 @@ class Scanner:
         for profile, score in ranked:
             self._scores[profile.address] = score
 
-        # --- Snapshot de posições para carteiras NOVAS (Regra 2 warm-up) ---
-        # Em paralelo: 20 carteiras × 200ms NY→London em série = 4s bloqueando
-        # o primeiro tick. `return_exceptions=True` garante que uma falha não
-        # aborta o resto.
+        # --- Snapshot paralelo de posições para whales novas ---
         newly_added = new_addresses - previous
         if newly_added:
             results = await asyncio.gather(
@@ -127,11 +106,11 @@ class Scanner:
         log.info(
             "scanner_tick_done",
             ranked=len(ranked), active=len(new_addresses),
-            newly_added=len(newly_added),
+            newly_added=len(newly_added), source="static_whitelist",
         )
 
     async def run_loop(self) -> None:
-        """Loop principal — executa um tick inicial + ticks a cada N min."""
+        """Loop principal — tick inicial + ticks periódicos."""
         await self.tick()
         interval = self._cfg.scan_interval_minutes * 60
         while not self._stop.is_set():

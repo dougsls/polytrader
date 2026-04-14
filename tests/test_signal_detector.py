@@ -50,7 +50,7 @@ async def _seed_whale(db_path: Path, wallet: str, token_id: str, size: float) ->
         await db.execute(
             "INSERT INTO whale_inventory (wallet_address, condition_id, token_id, "
             "size, avg_price, last_seen_at) VALUES (?, '0xCOND', ?, ?, 0.5, ?)",
-            (wallet, token_id, size, now),
+            (wallet.lower(), token_id, size, now),
         )
         await db.commit()
 

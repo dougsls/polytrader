@@ -60,7 +60,7 @@ class TradeMonitor:
         # sem ts viram todos (…, 0) e colidem como duplicatas.
         ts = trade.get("timestamp") or trade.get("time") or time.monotonic_ns()
         return (
-            trade.get("maker") or trade.get("user") or "",
+            (trade.get("maker") or trade.get("user") or "").lower(),
             trade.get("conditionId") or trade.get("condition_id") or "",
             trade.get("asset") or trade.get("tokenId") or "",
             (trade.get("side") or "").upper(),
@@ -91,7 +91,7 @@ class TradeMonitor:
             wallet = key[0]
             signal = await detect_signal(
                 trade=trade,
-                wallet_score=self._scores.get(wallet, 0.0),
+                wallet_score=self._scores.get(wallet.lower() if wallet else "", 0.0),
                 cfg=self._cfg,
                 gamma=self._gamma,
                 data_client=self._data,

@@ -75,7 +75,9 @@ async def detect_signal(
         trade_dt = now
 
     # --- Campos obrigatórios --------------------------------------------
-    wallet = trade.get("maker") or trade.get("makerAddress") or trade.get("user")
+    wallet_raw = trade.get("maker") or trade.get("makerAddress") or trade.get("user")
+    # Normaliza para lowercase — TARGET_WHALES + state + DB usam lower.
+    wallet = wallet_raw.lower() if wallet_raw else None
     condition_id = trade.get("conditionId") or trade.get("condition_id")
     token_id = trade.get("asset") or trade.get("tokenId") or trade.get("token_id")
     side_raw = (trade.get("side") or "").upper()

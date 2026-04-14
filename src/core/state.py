@@ -53,12 +53,14 @@ class InMemoryState:
         return new
 
     # --- Whale inventory -------------------------------------------------
+    # wallet é sempre armazenado lowercase. Os callers podem passar
+    # qualquer case — normalizamos aqui, evitando duplicatas em dict.
 
     def whale_size(self, wallet: str, token_id: str) -> float:
-        return self.whale_inventory.get((wallet, token_id), 0.0)
+        return self.whale_inventory.get((wallet.lower(), token_id), 0.0)
 
     def whale_set(self, wallet: str, token_id: str, size: float) -> None:
-        key = (wallet, token_id)
+        key = (wallet.lower(), token_id)
         if size <= 0:
             self.whale_inventory.pop(key, None)
         else:
@@ -90,7 +92,7 @@ class InMemoryState:
             ) as cur:
                 async for w, tok, sz in cur:
                     if sz and sz > 0:
-                        self.whale_inventory[(w, tok)] = float(sz)
+                        self.whale_inventory[(w.lower(), tok)] = float(sz)
 
         if conn is not None:
             await _load(conn)

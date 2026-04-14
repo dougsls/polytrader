@@ -10,7 +10,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 
@@ -27,14 +27,16 @@ from src.scanner.wallet_pool import WalletPool
 # --- Scanner parallel snapshot ---------------------------------------------
 
 async def test_scanner_snapshot_whale_runs_in_parallel(tmp_path: Path):
-    """Garante que newly_added carteiras disparam snapshots via asyncio.gather."""
+    """Garante que newly_added carteiras disparam snapshots via asyncio.gather.
+
+    Pós-sniper_whales: Scanner usa TARGET_WHALES (22 estáticos). Primeiro
+    tick marca todos como newly_added → disparo paralelo do snapshot.
+    """
     db = tmp_path / "s.db"
     await init_database(db)
 
     cfg = load_yaml_config().scanner
     data = AsyncMock(spec=DataAPIClient)
-    # Leaderboard vazio — tick não ranqueia ninguém mas testa o path
-    data.leaderboard = AsyncMock(return_value=[])
     data.positions = AsyncMock(return_value=[])
 
     pool = WalletPool(cfg, db_path=db)
@@ -45,36 +47,19 @@ async def test_scanner_snapshot_whale_runs_in_parallel(tmp_path: Path):
         cfg=cfg, data_client=data, pool=pool,
         active_wallets=active, wallet_scores=scores, state=state,
     )
-    # Vazio → early return pelo HIGH 3 fix
-    await scanner.tick()
-    assert data.positions.call_count == 0
-
-    # Agora com newly_added: mock o pool para retornar 3 carteiras novas
-    pool.rank = MagicMock(return_value=[])
 
     async def fake_snapshot(client, addr, *, state):  # noqa: ARG001
         await asyncio.sleep(0.05)
 
     with patch("src.scanner.scanner.snapshot_whale", new=fake_snapshot):
-        # Injeta diretamente em active_addresses para forçar newly_added
-        def fake_sync(ranked):  # sync stub
-            async def _fn():
-                pool.active_addresses.clear()
-                pool.active_addresses.update({"0xA", "0xB", "0xC"})
-            return _fn()
-        pool.sync = fake_sync
+        t0 = time.perf_counter()
+        await scanner.tick()
+        elapsed = time.perf_counter() - t0
 
-        # força "profiles" não-vazio pra passar do guard
-        from src.scanner.leaderboard import fetch_candidates  # noqa: F401
-        with patch(
-            "src.scanner.scanner.fetch_candidates",
-            new=AsyncMock(return_value=[MagicMock(address="0xA")]),
-        ):
-            t0 = time.perf_counter()
-            await scanner.tick()
-            elapsed = time.perf_counter() - t0
-    # 3 snapshots x 50ms serial = 150ms; paralelo ≤ 100ms
-    assert elapsed < 0.12
+    # ~20 snapshots (capped por max_wallets_tracked) × 50ms serial ≈ 1s;
+    # paralelo ≤ 250ms.
+    assert elapsed < 0.30, f"esperado < 300ms, veio {elapsed*1000:.0f}ms"
+    assert len(active) == cfg.max_wallets_tracked  # 20 no config default
 
 
 # --- Balance cache stale age -----------------------------------------------

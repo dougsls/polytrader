@@ -32,6 +32,8 @@ async def snapshot_whale(
     """
     positions = await data_client.positions(wallet_address)
     now = datetime.now(timezone.utc).isoformat()
+    # Normalização: DB + state guardam sempre lowercase.
+    wallet_address = wallet_address.lower()
 
     async with get_connection(db_path) as db:
         for pos in positions:
