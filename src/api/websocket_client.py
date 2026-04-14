@@ -55,13 +55,13 @@ class RTDSClient:
         self._watchdog: HeartbeatWatchdog | None = None
 
     async def _send_ping(self) -> None:
-        if self._ws is None or self._ws.closed:
+        if self._ws is None or (self._ws.state.name in ("CLOSED", "CLOSING")):
             raise RuntimeError("ws not connected")
         await self._ws.send("PING")
 
     async def _on_ping_fail(self) -> None:
         log.warning("rtds_ping_failed_restart_stream")
-        if self._ws is not None and not self._ws.closed:
+        if self._ws is not None and not (self._ws.state.name in ("CLOSED", "CLOSING")):
             await self._ws.close()
 
     async def stream(self) -> AsyncIterator[dict[str, Any]]:
@@ -124,5 +124,5 @@ class RTDSClient:
 
     async def close(self) -> None:
         self._stop.set()
-        if self._ws is not None and not self._ws.closed:
+        if self._ws is not None and not (self._ws.state.name in ("CLOSED", "CLOSING")):
             await self._ws.close()
