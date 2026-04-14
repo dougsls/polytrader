@@ -61,11 +61,18 @@ async def build_draft(
     db_path: Path = DEFAULT_DB_PATH,
 ) -> tuple[OrderDraft, CopyTrade, MarketSpec]:
     spec = await _load_market_spec(signal, gamma)
-    # Em paper_perfect_mirror, reproduzir preço EXATO da whale — sem offset.
-    # Offset de 2% (compensar latência NY→London) só faz sentido em live.
-    # Em paper, offset distorce entry price e gera slippage artificial.
+    # Em paper_perfect_mirror: sem offset de limit_price (compensação de
+    # latência NY→London só faz sentido em live). Em live: aplica offset.
     offset = 0.0 if (cfg.mode != "live" and getattr(cfg, "paper_perfect_mirror", False)) \
                  else cfg.limit_price_offset
+    # Realismo paper: fees + slippage simulado degradam o preço efetivo.
+    # BUY paga mais caro, SELL recebe menos — simula CLOB fees + book ruim.
+    if cfg.mode != "live":
+        fees = float(getattr(cfg, "paper_apply_fees", 0.0) or 0.0)
+        slip_sim = float(getattr(cfg, "paper_simulate_slippage", 0.0) or 0.0)
+        extra = fees + slip_sim
+        if extra > 0:
+            offset += extra  # degradação composta com offset existente
     raw_price = _limit_price(ref_price, signal.side, offset)
     # size em tokens = USD alocado / preço
     raw_size = sized_usd / max(raw_price, 0.01)

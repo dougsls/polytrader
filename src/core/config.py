@@ -157,6 +157,12 @@ class ExecutorConfig(_StrictModel):
     # tag exposure/price band). Cada signal vira fake-fill ao preço EXATO
     # da whale. Útil pra observar comportamento bruto. NUNCA ative em LIVE.
     paper_perfect_mirror: bool = False
+    # Realismo paper: fees do CLOB aplicadas em cada fill (0.01 = 1%).
+    # BUY: paga price*(1+fees). SELL: recebe price*(1-fees). Live real: 0.5-2%.
+    paper_apply_fees: float = Field(default=0.0, ge=0.0, le=0.1)
+    # Realismo paper: slippage adicional simulando book ilíquido.
+    # Ex: 0.015 = entry 1.5% pior que whale. Combina com fees.
+    paper_simulate_slippage: float = Field(default=0.0, ge=0.0, le=0.1)
     max_daily_loss_usd: float = Field(gt=0)
     max_drawdown_pct: float = Field(gt=0, le=1.0)
     min_price: float = Field(gt=0, lt=1)

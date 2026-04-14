@@ -600,7 +600,10 @@ def build_app(
             "       bp.outcome, bp.size, bp.avg_entry_price, bp.current_price, "
             "       bp.unrealized_pnl, bp.realized_pnl, bp.is_open, "
             "       bp.source_wallets_json, bp.opened_at, bp.closed_at, "
-            "       m.end_date, bp.close_reason "
+            "       m.end_date, bp.close_reason, "
+            "       (SELECT COUNT(*) FROM copy_trades ct WHERE ct.token_id = bp.token_id) AS fills, "
+            "       (SELECT COUNT(*) FROM copy_trades ct WHERE ct.token_id = bp.token_id AND ct.side='BUY') AS buy_fills, "
+            "       (SELECT COUNT(*) FROM copy_trades ct WHERE ct.token_id = bp.token_id AND ct.side='SELL') AS sell_fills "
             "FROM bot_positions bp "
             "LEFT JOIN market_metadata_cache m ON m.condition_id = bp.condition_id "
             "WHERE bp.is_open=1 "
@@ -649,6 +652,9 @@ def build_app(
                 "source_wallets_json": r[11],
                 "opened_at": r[12], "closed_at": r[13],
                 "end_date": end_date_raw, "hours_to_resolution": hours_left,
+                "fills": int(r[16] or 0),
+                "buy_fills": int(r[17] or 0),
+                "sell_fills": int(r[18] or 0),
             }
             if is_open:
                 open_list.append(item)
