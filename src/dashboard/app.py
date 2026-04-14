@@ -39,6 +39,18 @@ log = get_logger(__name__)
 DASHBOARD_HTML_PATH = Path(__file__).parent / "templates" / "index.html"
 
 
+def aiosqlite_safe_loads(raw: str | None) -> list[str]:
+    """Parse JSON array tolerante a null/malformed."""
+    if not raw:
+        return []
+    try:
+        import json as _json
+        v = _json.loads(raw)
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
+
 def _auth_dep(username: str, password: str):
     """Accepts HTTP Basic (user:pass) OR Bearer <password>."""
 
@@ -238,6 +250,162 @@ def build_app(
             "pnl": pnl,
             "signals_24h": signal_counts,
             "scoreboard": scoreboard,
+        }
+
+    @app.get("/api/equity-curve", dependencies=[auth])
+    async def api_equity_curve(hours: int = 24) -> dict[str, Any]:
+        """Reconstrói curva da banca: starting_bank + soma cumulativa de
+        realized_pnl ordenada por closed_at. Cada ponto é um fechamento.
+        Retorna também o snapshot atual (banca = start + realized + unrealized)."""
+        hours = max(1, min(hours, 168))  # 1h a 7d
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        starting_bank = balance_cache.balance_usdc
+        async with shared_conn.execute(
+            "SELECT closed_at, realized_pnl FROM bot_positions "
+            "WHERE is_open=0 AND closed_at >= ? ORDER BY closed_at ASC",
+            (cutoff,),
+        ) as cur:
+            rows = await cur.fetchall()
+        points: list[dict[str, Any]] = []
+        cumulative = 0.0
+        # Ponto inicial: banca no cutoff
+        points.append({"t": cutoff, "v": starting_bank, "pnl": 0.0})
+        for r in rows:
+            cumulative += float(r[1] or 0.0)
+            points.append({
+                "t": r[0],
+                "v": starting_bank + cumulative,
+                "pnl": cumulative,
+            })
+        # Ponto final = agora com unrealized incluído
+        async with shared_conn.execute(
+            "SELECT COALESCE(SUM(unrealized_pnl), 0) FROM bot_positions WHERE is_open=1"
+        ) as cur:
+            row = await cur.fetchone()
+        unrealized = float(row[0]) if row else 0.0
+        now_iso = datetime.now(timezone.utc).isoformat()
+        points.append({
+            "t": now_iso,
+            "v": starting_bank + cumulative + unrealized,
+            "pnl": cumulative + unrealized,
+        })
+        return {"starting_bank": starting_bank, "points": points,
+                "current_value": starting_bank + cumulative + unrealized}
+
+    @app.get("/api/velocity", dependencies=[auth])
+    async def api_velocity() -> dict[str, Any]:
+        """Lucro por minuto/hora/dia, com comparativo do período anterior."""
+        now = datetime.now(timezone.utc)
+        async def pnl_in_window(start: datetime, end: datetime) -> float:
+            async with shared_conn.execute(
+                "SELECT COALESCE(SUM(realized_pnl), 0) FROM bot_positions "
+                "WHERE is_open=0 AND closed_at >= ? AND closed_at < ?",
+                (start.isoformat(), end.isoformat()),
+            ) as cur:
+                r = await cur.fetchone()
+            return float(r[0]) if r else 0.0
+        # Janelas: última hora vs hora anterior; hoje vs ontem; etc.
+        h1 = await pnl_in_window(now - timedelta(hours=1), now)
+        h2 = await pnl_in_window(now - timedelta(hours=2), now - timedelta(hours=1))
+        d1 = await pnl_in_window(now - timedelta(hours=24), now)
+        d2 = await pnl_in_window(now - timedelta(hours=48), now - timedelta(hours=24))
+        m5 = await pnl_in_window(now - timedelta(minutes=5), now)
+        m10 = await pnl_in_window(now - timedelta(minutes=10), now - timedelta(minutes=5))
+        return {
+            "per_minute": m5 / 5.0,
+            "per_minute_prev": m10 / 5.0,
+            "per_hour": h1,
+            "per_hour_prev": h2,
+            "per_day": d1,
+            "per_day_prev": d2,
+        }
+
+    @app.get("/api/insights", dependencies=[auth])
+    async def api_insights() -> dict[str, Any]:
+        """Best hour, best market type, current streak, biggest win/loss."""
+        # Best hour (last 7d)
+        async with shared_conn.execute(
+            "SELECT strftime('%H', closed_at) AS h, "
+            "       SUM(realized_pnl) AS pnl, COUNT(*) AS n "
+            "FROM bot_positions WHERE is_open=0 AND closed_at IS NOT NULL "
+            "AND realized_pnl IS NOT NULL "
+            "GROUP BY h ORDER BY pnl DESC LIMIT 1"
+        ) as cur:
+            row = await cur.fetchone()
+        best_hour = ({"hour": int(row[0]), "pnl": float(row[1]), "n": int(row[2])}
+                     if row and row[0] else None)
+        # Streak atual (resolvidas em ordem reversa)
+        async with shared_conn.execute(
+            "SELECT realized_pnl FROM bot_positions "
+            "WHERE is_open=0 AND close_reason='resolved' "
+            "ORDER BY closed_at DESC LIMIT 50"
+        ) as cur:
+            recent = [float(r[0] or 0) for r in await cur.fetchall()]
+        streak_count = 0
+        streak_kind = None
+        for pnl in recent:
+            if pnl > 0:
+                if streak_kind in (None, "win"):
+                    streak_kind = "win"; streak_count += 1
+                else: break
+            elif pnl < 0:
+                if streak_kind in (None, "loss"):
+                    streak_kind = "loss"; streak_count += 1
+                else: break
+        # Biggest win / biggest loss (24h)
+        day_ago = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        async with shared_conn.execute(
+            "SELECT market_title, realized_pnl FROM bot_positions "
+            "WHERE is_open=0 AND closed_at >= ? "
+            "ORDER BY realized_pnl DESC LIMIT 1", (day_ago,),
+        ) as cur:
+            r = await cur.fetchone()
+        biggest_win = ({"market": r[0], "pnl": float(r[1])}
+                       if r and float(r[1] or 0) > 0 else None)
+        async with shared_conn.execute(
+            "SELECT market_title, realized_pnl FROM bot_positions "
+            "WHERE is_open=0 AND closed_at >= ? "
+            "ORDER BY realized_pnl ASC LIMIT 1", (day_ago,),
+        ) as cur:
+            r = await cur.fetchone()
+        biggest_loss = ({"market": r[0], "pnl": float(r[1])}
+                        if r and float(r[1] or 0) < 0 else None)
+        # Best whale (PnL gerado nos últimos 7d, attribution via source_wallets_json)
+        async with shared_conn.execute(
+            "SELECT source_wallets_json, realized_pnl FROM bot_positions "
+            "WHERE is_open=0 AND closed_at >= datetime('now','-7 days') "
+            "AND realized_pnl != 0"
+        ) as cur:
+            attr_rows = await cur.fetchall()
+        whale_pnl: dict[str, float] = {}
+        for row in attr_rows:
+            try:
+                wallets = aiosqlite_safe_loads(row[0])
+            except Exception:
+                wallets = []
+            if wallets:
+                share = float(row[1]) / len(wallets)
+                for w in wallets:
+                    whale_pnl[w.lower()] = whale_pnl.get(w.lower(), 0.0) + share
+        best_whale = None
+        if whale_pnl:
+            best_addr = max(whale_pnl, key=whale_pnl.get)
+            async with shared_conn.execute(
+                "SELECT name FROM tracked_wallets WHERE LOWER(address)=?",
+                (best_addr,),
+            ) as cur:
+                wn = await cur.fetchone()
+            best_whale = {
+                "address": best_addr,
+                "name": wn[0] if wn else best_addr[:10],
+                "pnl": whale_pnl[best_addr],
+            }
+        return {
+            "best_hour": best_hour,
+            "streak": {"kind": streak_kind, "count": streak_count},
+            "biggest_win": biggest_win,
+            "biggest_loss": biggest_loss,
+            "best_whale": best_whale,
         }
 
     @app.get("/api/wallets", dependencies=[auth])
