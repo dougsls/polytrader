@@ -149,8 +149,13 @@ class TradeMonitor:
         Dedup compartilhado com WS impede duplicatas quando ambos ativos.
         """
         interval = float(self._cfg.poll_interval_seconds)
-        log.info("polling_loop_start", interval_s=interval)
+        # Watermark inicial = agora. Sem isso, primeiro ciclo replay 10
+        # trades históricos por whale (1-3h antigos) — usuário vê delay
+        # falso e bot copia posições já maduras. Só queremos trades NOVOS.
+        startup_ts = int(time.time())
+        log.info("polling_loop_start", interval_s=interval, watermark=startup_ts)
         last_seen_ts: dict[str, int] = {}
+        _watermark_default = startup_ts
         while True:
             try:
                 whales = list(active_wallets)
@@ -167,7 +172,7 @@ class TradeMonitor:
                         log.warning("polling_fetch_failed",
                                     addr=wallet[:10], err=repr(res))
                         continue
-                    last_ts = last_seen_ts.get(wallet, 0)
+                    last_ts = last_seen_ts.get(wallet, _watermark_default)
                     max_ts = last_ts
                     # Polymarket /trades returns newest-first, mas garantimos.
                     for t in res:

@@ -32,12 +32,13 @@ scanner:
 # === Tracker ===
 tracker:
   enabled: true
-  poll_interval_seconds: 15
+  # 5s = quase tempo real, polling cobre RTDS quebrado.
+  # 20 whales × 1 GET cada = 4 req/s — bem dentro do rate limit Polymarket.
+  poll_interval_seconds: 5
   use_websocket: true
-  # Paper testing: aceita trades até 24h de idade + qualquer tamanho,
-  # pra ter atividade abundante no dashboard para análise.
-  # Em LIVE (sniper), baixar para: signal_max_age=300 (5min), min_size=10.
-  signal_max_age_seconds: 86400
+  # Paper real-time: só sinais frescos (≤5min). Watermark de startup
+  # impede replay de histórico no boot. Em LIVE (sniper) idem 300s.
+  signal_max_age_seconds: 300
   min_trade_size_usd: 1.0
 
   market_duration_filter:
