@@ -84,19 +84,31 @@ class RiskManager:
 
     def _size_usd(self, signal: TradeSignal, state: RiskState) -> float:
         mode = self._cfg.sizing_mode
+        portfolio = max(state.total_portfolio_value, 1.0)
         if mode == "fixed":
             return self._cfg.fixed_size_usd
         if mode == "proportional":
-            return max(state.total_portfolio_value, 1.0) * self._cfg.proportional_factor
+            return portfolio * self._cfg.proportional_factor
         if mode == "kelly":
-            # Kelly simplificado: f* = win_rate - (1-win_rate)/odds.
-            # Aproximamos odds via preço (preço 0.5 ⇒ odds 1:1).
+            # f* = win_rate - (1-win_rate)/odds. Odds ≈ (1-price)/price.
             price = max(min(signal.price, 0.99), 0.01)
-            win = signal.wallet_score  # proxy
+            win = signal.wallet_score
             lose = 1 - win
             odds = (1 - price) / price
             kelly = max(win - lose / odds, 0.0)
-            return max(state.total_portfolio_value, 1.0) * min(kelly, 0.25)
+            return portfolio * min(kelly, 0.25)
+        if mode == "whale_proportional":
+            # Espelha a % que a whale apostou DO PORTFOLIO DELA.
+            # size_usd = (whale_trade_usd / whale_portfolio_usd) × our_portfolio × factor
+            # Se whale_portfolio ausente/zero, fallback para proportional.
+            whale_bank = (signal.whale_portfolio_usd or 0.0)
+            if whale_bank <= 0 or signal.usd_value <= 0:
+                return portfolio * self._cfg.proportional_factor
+            conviction = signal.usd_value / whale_bank
+            # cap hard em 25% do nosso portfolio pra evitar outlier (whale
+            # fazendo all-in num trade de lottery)
+            conviction_capped = min(conviction, 0.25)
+            return portfolio * conviction_capped * self._cfg.whale_sizing_factor
         return self._cfg.fixed_size_usd
 
     # -- Checklist ----------------------------------------------------------

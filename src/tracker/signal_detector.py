@@ -48,10 +48,11 @@ async def detect_signal(
     wallet_score: float,
     cfg: TrackerConfig,
     gamma: GammaAPIClient,
-    data_client: DataAPIClient,  # noqa: ARG001 — reservado para futura validação on-chain
+    data_client: DataAPIClient,  # noqa: ARG001
     db_path: Path = DEFAULT_DB_PATH,
     conn: aiosqlite.Connection | None = None,
     state: InMemoryState | None = None,
+    whale_portfolio_usd: float | None = None,
 ) -> TradeSignal | None:
     """Retorna TradeSignal qualificado ou None se o trade deve ser ignorado.
 
@@ -211,4 +212,5 @@ async def detect_signal(
         source="websocket",
         status="pending",
         skip_reason=None,
+        whale_portfolio_usd=whale_portfolio_usd,
     )

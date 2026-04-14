@@ -63,6 +63,9 @@ class TradeSignal(_BaseModel):
     source: SignalSource
     status: SignalStatus = "pending"
     skip_reason: str | None = None
+    # Portfolio da whale (volume_usd do enrich). Usado por whale_proportional
+    # para calcular convicção: (trade_usd / whale_portfolio) × our_portfolio.
+    whale_portfolio_usd: float | None = None
 
 
 class CopyTrade(_BaseModel):

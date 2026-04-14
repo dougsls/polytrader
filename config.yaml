@@ -58,11 +58,20 @@ executor:
   # Teto de capital no primeiro live — representa 10% do portfolio-alvo.
   # Escalar progressivamente para 500 após 3-5 dias de live cauteloso.
   max_portfolio_usd: 50
-  max_position_usd: 100
+  # Paper testing: teto POR posição = 20% da banca. Evita estourar
+  # max_portfolio_usd com uma única ordem. Em live, ajustar proporcional.
+  max_position_usd: 10
   max_positions: 15
-  sizing_mode: "proportional"
-  fixed_size_usd: 20
-  proportional_factor: 0.05
+  # whale_proportional = espelha a % de convicção da whale.
+  # size = (whale_trade_usd / whale_portfolio_usd) × our_bank × factor
+  # Cap interno 25% pra evitar outlier (whale fazendo all-in).
+  sizing_mode: "whale_proportional"
+  fixed_size_usd: 10
+  # Paper: 10% por trade pra ter volumes visíveis. Live: 5%.
+  proportional_factor: 0.10
+  # Multiplicador de convicção. 1.0 = mirror exato.
+  # >1.0 amplifica, <1.0 atenua.
+  whale_sizing_factor: 1.0
 
   max_daily_loss_usd: 100
   max_drawdown_pct: 0.20

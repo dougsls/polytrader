@@ -221,6 +221,7 @@ async def amain() -> None:
     wallet_pool = WalletPool(settings.config.scanner, db_path=DEFAULT_DB_PATH)
     active_wallets: set[str] = set()
     wallet_scores: dict[str, float] = {}
+    wallet_portfolios: dict[str, float] = {}
     rtds = RTDSClient(active_wallets)
     signal_queue: asyncio.Queue[TradeSignal] = asyncio.Queue(maxsize=1000)
     monitor = TradeMonitor(
@@ -228,6 +229,7 @@ async def amain() -> None:
         data_client=data_client, gamma=gamma, ws_client=rtds,
         wallet_scores=wallet_scores, queue=signal_queue,
         conn=shared_conn, state=state,
+        wallet_portfolios=wallet_portfolios,
     )
     scanner = Scanner(
         cfg=settings.config.scanner,
@@ -236,6 +238,7 @@ async def amain() -> None:
         active_wallets=active_wallets,
         wallet_scores=wallet_scores,
         state=state,
+        wallet_portfolios=wallet_portfolios,
     )
 
     # --- balance cache (Phase 3/5) --------------------------------------
@@ -392,6 +395,7 @@ async def amain() -> None:
         asyncio.create_task(heartbeat_loop(shutdown), name="heartbeat"),
         asyncio.create_task(scanner.run_loop(), name="scanner"),
         asyncio.create_task(monitor.run_websocket(), name="tracker-ws"),
+        asyncio.create_task(monitor.run_polling(active_wallets), name="tracker-polling"),
         asyncio.create_task(engine.run_loop(), name="copy-engine"),
         asyncio.create_task(balance_cache.run_loop(), name="balance-cache"),
         asyncio.create_task(refresh_risk_state(), name="risk-state-refresh"),

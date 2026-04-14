@@ -148,9 +148,13 @@ class ExecutorConfig(_StrictModel):
     max_portfolio_usd: float = Field(gt=0)
     max_position_usd: float = Field(gt=0)
     max_positions: int = Field(ge=1)
-    sizing_mode: Literal["fixed", "proportional", "kelly"]
+    sizing_mode: Literal["fixed", "proportional", "kelly", "whale_proportional"]
     fixed_size_usd: float = Field(gt=0)
     proportional_factor: float = Field(gt=0, le=1.0)
+    # whale_proportional: multiplicador da % que a whale apostou do portfolio
+    # dela. 1.0 = espelho exato (se whale arrisca 5% do bank → nós também).
+    # >1.0 = amplificar convicção. <1.0 = atenuar.
+    whale_sizing_factor: float = Field(gt=0, le=5.0, default=1.0)
     max_daily_loss_usd: float = Field(gt=0)
     max_drawdown_pct: float = Field(gt=0, le=1.0)
     min_price: float = Field(gt=0, lt=1)

@@ -41,12 +41,16 @@ class Scanner:
         active_wallets: set[str],
         wallet_scores: dict[str, float],
         state: InMemoryState,
+        wallet_portfolios: dict[str, float] | None = None,
     ) -> None:
         self._cfg = cfg
         self._data = data_client
         self._pool = pool
-        self._active = active_wallets  # referência viva — NUNCA reatribuir
-        self._scores = wallet_scores   # idem
+        self._active = active_wallets
+        self._scores = wallet_scores
+        # Dict vivo address→volume_usd (portfolio da whale via /value).
+        # Consumido pelo TradeMonitor pra preencher signal.whale_portfolio_usd.
+        self._portfolios = wallet_portfolios if wallet_portfolios is not None else {}
         self._state = state
         self._stop = asyncio.Event()
 
@@ -93,8 +97,10 @@ class Scanner:
         self._active.update(new_addresses)
 
         self._scores.clear()
+        self._portfolios.clear()
         for profile, score in ranked:
             self._scores[profile.address] = score
+            self._portfolios[profile.address] = profile.volume_usd
 
         # --- Snapshot paralelo de posições para whales novas ---
         newly_added = new_addresses - previous

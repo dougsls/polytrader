@@ -39,12 +39,14 @@ class TradeMonitor:
         db_path: Path = DEFAULT_DB_PATH,
         conn: aiosqlite.Connection | None = None,
         state: InMemoryState | None = None,
+        wallet_portfolios: dict[str, float] | None = None,
     ) -> None:
         self._cfg = cfg
         self._data = data_client
         self._gamma = gamma
         self._ws = ws_client
         self._scores = wallet_scores
+        self._portfolios = wallet_portfolios or {}
         self._queue = queue
         self._db_path = db_path
         self._conn = conn
@@ -82,47 +84,87 @@ class TradeMonitor:
         while len(self._seen) > self._seen_max_size:
             self._seen.popitem(last=False)
 
+    async def _enqueue_trade(self, trade: dict, source: str) -> None:
+        """Fluxo comum: dedup → detect_signal → enqueue com backpressure."""
+        key = self._dedup_key(trade)
+        if key in self._seen:
+            return
+        self._remember(key)
+        wallet = key[0]
+        wallet_lower = wallet.lower() if wallet else ""
+        signal = await detect_signal(
+            trade=trade,
+            wallet_score=self._scores.get(wallet_lower, 0.0),
+            whale_portfolio_usd=self._portfolios.get(wallet_lower),
+            cfg=self._cfg, gamma=self._gamma, data_client=self._data,
+            db_path=self._db_path, conn=self._conn, state=self._state,
+        )
+        if not signal:
+            return
+        try:
+            self._queue.put_nowait(signal)
+            metrics.signals_received.inc()
+            metrics.queue_size.set(self._queue.qsize())
+            log.info("signal_queued", id=signal.id, side=signal.side, source=source)
+        except asyncio.QueueFull:
+            try:
+                dropped = self._queue.get_nowait()
+                self._queue.task_done()
+                self._queue.put_nowait(signal)
+                metrics.signals_dropped.inc()
+                log.warning("signal_dropped_due_to_backpressure",
+                            dropped_id=dropped.id, kept_id=signal.id)
+            except (asyncio.QueueEmpty, asyncio.QueueFull):
+                metrics.signals_dropped.inc()
+
+    async def run_polling(self, active_wallets: set[str]) -> None:
+        """Fallback: polling /trades?user=ADDR a cada poll_interval_seconds.
+
+        Complementar ao WS. Se a whale operar, polling detecta em <=15s.
+        Dedup compartilhado com WS impede duplicatas quando ambos ativos.
+        """
+        interval = float(self._cfg.poll_interval_seconds)
+        log.info("polling_loop_start", interval_s=interval)
+        last_seen_ts: dict[str, int] = {}
+        while True:
+            try:
+                whales = list(active_wallets)
+                if not whales:
+                    await asyncio.sleep(interval)
+                    continue
+                # Paralelo: pega últimos N trades de cada whale.
+                results = await asyncio.gather(
+                    *[self._data.trades(w, limit=10) for w in whales],
+                    return_exceptions=True,
+                )
+                for wallet, res in zip(whales, results, strict=False):
+                    if isinstance(res, Exception):
+                        log.warning("polling_fetch_failed",
+                                    addr=wallet[:10], err=repr(res))
+                        continue
+                    last_ts = last_seen_ts.get(wallet, 0)
+                    max_ts = last_ts
+                    # Polymarket /trades returns newest-first, mas garantimos.
+                    for t in res:
+                        ts_raw = t.get("timestamp") or t.get("time") or 0
+                        try:
+                            ts = int(ts_raw)
+                        except (TypeError, ValueError):
+                            ts = 0
+                        if ts <= last_ts:
+                            continue
+                        if ts > max_ts:
+                            max_ts = ts
+                        # Injeta maker se ausente (endpoint retorna user)
+                        if "maker" not in t:
+                            t["maker"] = wallet
+                        await self._enqueue_trade(t, source="polling")
+                    last_seen_ts[wallet] = max_ts
+            except Exception as exc:  # noqa: BLE001
+                log.error("polling_loop_crash", err=repr(exc))
+            await asyncio.sleep(interval)
+
     async def run_websocket(self) -> None:
+        """WebSocket RTDS — path primário (quando o endpoint está OK)."""
         async for trade in self._ws.stream():
-            key = self._dedup_key(trade)
-            if key in self._seen:
-                continue
-            self._remember(key)
-            wallet = key[0]
-            signal = await detect_signal(
-                trade=trade,
-                wallet_score=self._scores.get(wallet.lower() if wallet else "", 0.0),
-                cfg=self._cfg,
-                gamma=self._gamma,
-                data_client=self._data,
-                db_path=self._db_path,
-                conn=self._conn,
-                state=self._state,
-            )
-            if signal:
-                # Backpressure non-blocking: em storm, preferimos dropar o
-                # sinal mais ANTIGO (provavelmente irrelevante já) e manter
-                # o novo. Nunca bloqueamos o tracker WS — se travar aqui,
-                # o heartbeat do RTDS morre e perdemos a conexão inteira.
-                try:
-                    self._queue.put_nowait(signal)
-                    metrics.signals_received.inc()
-                    metrics.queue_size.set(self._queue.qsize())
-                    log.info("signal_queued", id=signal.id, side=signal.side)
-                except asyncio.QueueFull:
-                    try:
-                        dropped = self._queue.get_nowait()
-                        self._queue.task_done()
-                        self._queue.put_nowait(signal)
-                        metrics.signals_dropped.inc()
-                        log.warning(
-                            "signal_dropped_due_to_backpressure",
-                            dropped_id=dropped.id, kept_id=signal.id,
-                            qsize=self._queue.qsize(),
-                        )
-                    except (asyncio.QueueEmpty, asyncio.QueueFull):
-                        metrics.signals_dropped.inc()
-                        log.warning(
-                            "signal_dropped_due_to_backpressure",
-                            id=signal.id, qsize=self._queue.qsize(),
-                        )
+            await self._enqueue_trade(trade, source="websocket")
