@@ -34,10 +34,11 @@ tracker:
   enabled: true
   poll_interval_seconds: 15
   use_websocket: true
-  # Paper testing: aceita trades até 1h de idade pra ver atividade no dashboard.
-  # Em live (sniper mode), 300s ou menos pra copiar só o que é fresh.
-  signal_max_age_seconds: 3600
-  min_trade_size_usd: 10
+  # Paper testing: aceita trades até 24h de idade + qualquer tamanho,
+  # pra ter atividade abundante no dashboard para análise.
+  # Em LIVE (sniper), baixar para: signal_max_age=300 (5min), min_size=10.
+  signal_max_age_seconds: 86400
+  min_trade_size_usd: 1.0
 
   market_duration_filter:
     enabled: true
