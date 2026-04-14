@@ -408,6 +408,150 @@ def build_app(
             "best_whale": best_whale,
         }
 
+    @app.get("/api/position/{pid}", dependencies=[auth])
+    async def api_position_detail(pid: int) -> dict[str, Any]:
+        """Timeline completa de uma posição: signal → trade → fill → resolução."""
+        async with shared_conn.execute(
+            "SELECT id, condition_id, token_id, market_title, outcome, size, "
+            "       avg_entry_price, current_price, unrealized_pnl, realized_pnl, "
+            "       is_open, source_wallets_json, opened_at, closed_at, close_reason "
+            "FROM bot_positions WHERE id=?", (pid,),
+        ) as cur:
+            p = await cur.fetchone()
+        if not p:
+            raise HTTPException(404, "posição não encontrada")
+        position = {
+            "id": p[0], "condition_id": p[1], "token_id": p[2],
+            "market_title": p[3], "outcome": p[4], "size": p[5],
+            "avg_entry_price": p[6], "current_price": p[7],
+            "unrealized_pnl": p[8], "realized_pnl": p[9],
+            "is_open": bool(p[10]),
+            "source_wallets": aiosqlite_safe_loads(p[11]),
+            "opened_at": p[12], "closed_at": p[13],
+            "close_reason": p[14],
+        }
+        # Copy trades desta posição (via token_id)
+        async with shared_conn.execute(
+            "SELECT id, signal_id, side, intended_size, executed_size, "
+            "       intended_price, executed_price, slippage, status, "
+            "       created_at, filled_at "
+            "FROM copy_trades WHERE token_id=? ORDER BY created_at ASC", (p[2],),
+        ) as cur:
+            trades = [
+                {"id": t[0], "signal_id": t[1], "side": t[2],
+                 "intended_size": t[3], "executed_size": t[4],
+                 "intended_price": t[5], "executed_price": t[6],
+                 "slippage": t[7], "status": t[8],
+                 "created_at": t[9], "filled_at": t[10]}
+                for t in await cur.fetchall()
+            ]
+        # Market metadata
+        async with shared_conn.execute(
+            "SELECT end_date, slug FROM market_metadata_cache WHERE condition_id=?",
+            (p[1],),
+        ) as cur:
+            mkt = await cur.fetchone()
+        return {
+            "position": position,
+            "trades": trades,
+            "market": {"end_date": mkt[0] if mkt else None,
+                       "slug": mkt[1] if mkt else None},
+        }
+
+    @app.get("/api/analytics/histogram", dependencies=[auth])
+    async def api_hist() -> dict[str, Any]:
+        """Distribuição de PnL em bins de $2. Útil pra ver se lucros/prejuízos
+        são concentrados ou dispersos."""
+        async with shared_conn.execute(
+            "SELECT realized_pnl FROM bot_positions "
+            "WHERE is_open=0 AND realized_pnl IS NOT NULL"
+        ) as cur:
+            pnls = [float(r[0] or 0.0) for r in await cur.fetchall()]
+        if not pnls:
+            return {"bins": [], "min": 0, "max": 0, "count": 0}
+        bin_size = 2.0
+        lo = min(pnls); hi = max(pnls)
+        # Bins alinhados a múltiplos de bin_size
+        bin_lo = (int(lo / bin_size) - 1) * bin_size
+        bin_hi = (int(hi / bin_size) + 1) * bin_size
+        n_bins = max(1, int((bin_hi - bin_lo) / bin_size))
+        counts = [0] * n_bins
+        for p in pnls:
+            idx = min(n_bins - 1, max(0, int((p - bin_lo) / bin_size)))
+            counts[idx] += 1
+        bins = [{"lo": bin_lo + i * bin_size, "hi": bin_lo + (i+1) * bin_size,
+                 "count": counts[i]} for i in range(n_bins)]
+        return {"bins": bins, "min": lo, "max": hi, "count": len(pnls),
+                "bin_size": bin_size}
+
+    @app.get("/api/analytics/whales", dependencies=[auth])
+    async def api_whales_perf() -> list[dict[str, Any]]:
+        """Leaderboard de whales por PnL GERADO pro nosso bot (attribution
+        via source_wallets_json). Diferente do /api/wallets que mostra stats
+        públicas da whale na Polymarket."""
+        async with shared_conn.execute(
+            "SELECT source_wallets_json, realized_pnl, is_open, unrealized_pnl "
+            "FROM bot_positions WHERE source_wallets_json IS NOT NULL"
+        ) as cur:
+            rows = await cur.fetchall()
+        agg: dict[str, dict[str, Any]] = {}
+        for r in rows:
+            wallets = aiosqlite_safe_loads(r[0])
+            if not wallets:
+                continue
+            pnl = float(r[1] or 0.0) + (float(r[3] or 0.0) if r[2] else 0.0)
+            share = 1.0 / len(wallets)
+            for w in wallets:
+                addr = w.lower()
+                d = agg.setdefault(addr, {
+                    "address": addr, "pnl": 0.0, "n": 0, "wins": 0, "losses": 0,
+                })
+                d["pnl"] += pnl * share
+                d["n"] += 1
+                if not r[2]:  # closed
+                    if float(r[1] or 0.0) > 0:
+                        d["wins"] += 1
+                    elif float(r[1] or 0.0) < 0:
+                        d["losses"] += 1
+        # Enrich com names
+        names: dict[str, str] = {}
+        async with shared_conn.execute(
+            "SELECT LOWER(address), name FROM tracked_wallets"
+        ) as cur:
+            for row in await cur.fetchall():
+                names[row[0]] = row[1]
+        out = []
+        for addr, d in agg.items():
+            d["name"] = names.get(addr, addr[:8] + "…" + addr[-4:])
+            resolved = d["wins"] + d["losses"]
+            d["wr"] = (d["wins"] / resolved * 100.0) if resolved > 0 else None
+            out.append(d)
+        out.sort(key=lambda x: x["pnl"], reverse=True)
+        return out
+
+    @app.get("/api/analytics/heatmap", dependencies=[auth])
+    async def api_heatmap() -> dict[str, Any]:
+        """Grid 7 (dia da semana) × 24 (hora) com soma de PnL por célula."""
+        async with shared_conn.execute(
+            "SELECT closed_at, realized_pnl FROM bot_positions "
+            "WHERE is_open=0 AND closed_at IS NOT NULL"
+        ) as cur:
+            rows = await cur.fetchall()
+        grid = [[0.0] * 24 for _ in range(7)]  # [dow][hour]
+        counts = [[0] * 24 for _ in range(7)]
+        for r in rows:
+            try:
+                d = datetime.fromisoformat((r[0] or "").replace("Z", "+00:00"))
+                if d.tzinfo is None:
+                    d = d.replace(tzinfo=timezone.utc)
+                dow = d.weekday()  # 0=Mon
+                hr = d.hour
+                grid[dow][hr] += float(r[1] or 0.0)
+                counts[dow][hr] += 1
+            except Exception:
+                continue
+        return {"grid": grid, "counts": counts}
+
     @app.get("/api/wallets", dependencies=[auth])
     async def api_wallets() -> list[dict[str, Any]]:
         async with shared_conn.execute(

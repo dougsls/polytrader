@@ -181,6 +181,8 @@
     .tape-market { color: var(--text); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .tape-val { font-family: var(--ff-mono); font-weight: 600; text-align: right; }
     .tape-whale { font-size: 10px; color: var(--text-2); display: flex; align-items: center; gap: 4px; }
+    a.tape-whale:hover, a.whale-link:hover { color: var(--info) !important; text-decoration: underline !important; }
+    a.whale-link { color: inherit; text-decoration: none; }
 
     /* ============ ZONE 5 — INSIGHTS ============ */
     .insights-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 14px; }
@@ -246,6 +248,70 @@
     /* Skeleton */
     .skeleton { background: linear-gradient(90deg, var(--surface-2) 0%, var(--surface-3) 50%, var(--surface-2) 100%); background-size: 200% 100%; animation: shimmer 1.4s ease infinite; border-radius: 4px; color: transparent; }
     @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+    /* ============ DRAWER (detalhe) ============ */
+    .drawer-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.55); backdrop-filter: blur(2px); z-index: 200; opacity: 0; pointer-events: none; transition: opacity 0.25s ease; }
+    .drawer-overlay.open { opacity: 1; pointer-events: auto; }
+    .drawer {
+      position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 92vw);
+      background: var(--surface-1); border-left: 1px solid var(--border);
+      z-index: 201; transform: translateX(100%); transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+      display: flex; flex-direction: column; overflow: hidden;
+      box-shadow: -20px 0 60px rgba(0,0,0,0.5);
+    }
+    .drawer.open { transform: translateX(0); }
+    .drawer-head { padding: 18px 22px; border-bottom: 1px solid var(--border-soft); display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    .drawer-head h3 { font-size: 15px; font-weight: 600; line-height: 1.3; }
+    .drawer-close { background: var(--surface-3); border: none; color: var(--text-2); width: 28px; height: 28px; border-radius: 6px; cursor: pointer; font-size: 16px; display: grid; place-items: center; transition: all 0.15s ease; }
+    .drawer-close:hover { background: var(--surface-hover); color: var(--text); }
+    .drawer-body { flex: 1; overflow-y: auto; padding: 18px 22px; }
+    .drawer-body h4 { font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--text-3); font-weight: 700; margin: 18px 0 10px; }
+    .drawer-body h4:first-child { margin-top: 0; }
+    .kv-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: 12px; }
+    .kv-grid .k { color: var(--text-3); }
+    .kv-grid .v { color: var(--text); font-family: var(--ff-mono); font-weight: 600; text-align: right; }
+    .timeline { position: relative; padding-left: 20px; }
+    .timeline::before { content: ''; position: absolute; left: 6px; top: 6px; bottom: 6px; width: 2px; background: var(--border); }
+    .tl-item { position: relative; padding: 8px 0 14px 10px; }
+    .tl-item::before { content: ''; position: absolute; left: -18px; top: 11px; width: 10px; height: 10px; border-radius: 50%; background: var(--info); box-shadow: 0 0 0 3px var(--surface-1); }
+    .tl-item.win::before { background: var(--gain); }
+    .tl-item.loss::before { background: var(--loss); }
+    .tl-item.sold::before { background: var(--live); }
+    .tl-time { font-size: 10px; color: var(--text-3); font-family: var(--ff-mono); }
+    .tl-title { font-weight: 600; font-size: 12px; color: var(--text); margin: 2px 0; }
+    .tl-desc { font-size: 11px; color: var(--text-2); font-family: var(--ff-mono); }
+    table.ledger tbody tr { cursor: pointer; }
+
+    /* ============ ZONE 7 — DEEP ANALYTICS ============ */
+    .analytics-grid { display: grid; grid-template-columns: 1.2fr 1fr 1.6fr; gap: 14px; }
+    .hist-wrap { padding: 16px 18px; }
+    .hist-bars { display: flex; align-items: flex-end; gap: 2px; height: 140px; margin: 14px 0 6px; padding-bottom: 18px; border-bottom: 1px solid var(--border-soft); position: relative; }
+    .hist-bar { flex: 1; background: linear-gradient(180deg, currentColor 0%, transparent 120%); min-width: 4px; border-radius: 2px 2px 0 0; position: relative; transition: opacity 0.2s ease; }
+    .hist-bar:hover { opacity: 0.7; }
+    .hist-bar .bar-tip { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--surface-3); padding: 3px 6px; border-radius: 3px; font-size: 10px; color: var(--text); white-space: nowrap; display: none; }
+    .hist-bar:hover .bar-tip { display: block; }
+    .hist-axis { display: flex; justify-content: space-between; font-size: 10px; font-family: var(--ff-mono); color: var(--text-3); }
+
+    .whales-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .whales-table td { padding: 8px 14px; border-bottom: 1px solid var(--border-soft); }
+    .whales-table td:nth-child(2) { font-family: var(--ff-mono); font-weight: 600; text-align: right; }
+    .whales-table td:nth-child(3) { font-family: var(--ff-mono); text-align: right; color: var(--text-2); font-size: 11px; }
+    .whales-table tr:hover td { background: var(--surface-2); }
+
+    .heatmap { padding: 16px 18px; overflow-x: auto; }
+    .heat-grid { display: grid; grid-template-columns: 34px repeat(24, 1fr); gap: 2px; font-size: 9px; min-width: 560px; }
+    .heat-cell { aspect-ratio: 1; border-radius: 2px; background: var(--surface-2); cursor: default; transition: transform 0.1s ease; position: relative; }
+    .heat-cell:hover { transform: scale(1.2); z-index: 2; outline: 1px solid var(--text); }
+    .heat-cell .tip { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--surface-3); padding: 4px 8px; border-radius: 4px; font-size: 10px; color: var(--text); white-space: nowrap; display: none; z-index: 3; font-family: var(--ff-mono); }
+    .heat-cell:hover .tip { display: block; }
+    .heat-label { color: var(--text-3); font-family: var(--ff-mono); font-weight: 600; display: grid; place-items: center; }
+
+    /* ============ KBD / FOCUS MODE ============ */
+    .kbd-hint { position: fixed; bottom: 12px; right: 12px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 10px; color: var(--text-3); font-family: var(--ff-mono); z-index: 50; opacity: 0.7; transition: opacity 0.2s; }
+    .kbd-hint:hover { opacity: 1; }
+    .kbd { display: inline-block; background: var(--surface-3); border: 1px solid var(--border); border-radius: 3px; padding: 1px 5px; font-family: var(--ff-mono); font-size: 10px; color: var(--text); margin: 0 2px; }
+    body.focus-mode .topbar, body.focus-mode section:not(.command-grid):not(.mid-row) { display: none; }
+    body.focus-mode .container > .mid-row:nth-of-type(2), body.focus-mode #scoreboard-card, body.focus-mode .analytics-grid, body.focus-mode .card:last-child { display: none !important; }
   </style>
 </head>
 <body>
@@ -419,7 +485,7 @@
       <input type="text" class="search-box" id="filter-search" placeholder="🔍 buscar mercado…">
     </div>
     <div style="max-height: 520px; overflow-y: auto;">
-      <table class="ledger" id="ledger-table">
+      <table class="ledger" id="ledger-table" data-clickable="1">
         <thead>
           <tr>
             <th>Quando</th>
@@ -443,6 +509,51 @@
     </div>
   </div>
 
+  <!-- ZONE 7 — DEEP ANALYTICS -->
+  <section class="analytics-grid">
+    <div class="card hist-wrap">
+      <div class="card-title" style="margin-bottom:6px;">📊 Distribuição de PnL</div>
+      <div id="hist-bars" class="hist-bars"></div>
+      <div id="hist-axis" class="hist-axis"><span>—</span><span>—</span></div>
+      <div style="font-size:10px;color:var(--text-3);margin-top:8px;">cada barra = bin de $2. Concentração na direita = lucros consistentes.</div>
+    </div>
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">🐋 Performance por Whale</div>
+      </div>
+      <div style="max-height:280px;overflow-y:auto;">
+        <table class="whales-table" id="whales-table">
+          <tbody><tr><td colspan="3" style="text-align:center;padding:24px;color:var(--text-3);">carregando…</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="card heatmap">
+      <div class="card-title" style="margin-bottom:10px;">🔥 Heatmap Hora × Dia</div>
+      <div id="heat-grid" class="heat-grid"><span class="muted" style="padding:20px;">carregando…</span></div>
+      <div style="font-size:10px;color:var(--text-3);margin-top:12px;">verde = PnL positivo · vermelho = negativo · intensidade = magnitude</div>
+    </div>
+  </section>
+
+</div>
+
+<!-- DRAWER -->
+<div class="drawer-overlay" id="drawer-overlay"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-head">
+    <h3 id="dr-title">—</h3>
+    <button class="drawer-close" id="dr-close">✕</button>
+  </div>
+  <div class="drawer-body" id="dr-body"></div>
+</div>
+
+<!-- KBD HINT -->
+<div class="kbd-hint" id="kbd-hint">
+  <span class="kbd">G</span> ganhas ·
+  <span class="kbd">L</span> perdas ·
+  <span class="kbd">O</span> abertas ·
+  <span class="kbd">/</span> busca ·
+  <span class="kbd">F</span> focus ·
+  <span class="kbd">Esc</span> fechar
 </div>
 
 <script>
@@ -751,7 +862,7 @@ function renderTape(signals, trades) {
       <span class="${sideCls} mono" style="font-weight:600;font-size:11px;">${icon} ${i.side || '—'}</span>
       <span class="tape-market" title="${i.market}">${i.market}</span>
       <span class="tape-val mono">${i.price ? i.price.toFixed(3) : '—'} · $${(i.usd||0).toFixed(0)}</span>
-      <span class="tape-whale muted">🐋 ${whaleShort}</span>
+      ${i.whale ? `<a class="tape-whale muted" href="https://polymarket.com/profile/${i.whale}" target="_blank" rel="noopener" title="Abrir perfil de ${i.whale} no Polymarket" style="text-decoration:none;">🐋 ${whaleShort}</a>` : `<span class="tape-whale muted">—</span>`}
     </div>`;
   }).join('');
 }
@@ -810,7 +921,7 @@ function renderLedger() {
     const resolveIn = p.hours_to_resolution != null
       ? (p.hours_to_resolution <= 0 ? '⏰ resolvendo' : (p.hours_to_resolution < 1 ? `${Math.floor(p.hours_to_resolution*60)}min` : `${p.hours_to_resolution.toFixed(1)}h`))
       : '—';
-    return `<tr class="${rowClass}">
+    return `<tr class="${rowClass}" data-pid="${p.id}">
       <td data-label="Quando" class="dim mono">${fmt.time(when)}</td>
       <td data-label="Status">${statusBadge}</td>
       <td data-label="Mercado" class="cell-mkt" title="${(p.market_title||'').replace(/"/g,'&quot;')}">${p.market_title || '—'}</td>
@@ -856,6 +967,193 @@ function bindFilters() {
 }
 bindFilters();
 
+/* ============== DRAWER (detalhe da posição) ============== */
+async function openDrawer(pid) {
+  $('drawer').classList.add('open');
+  $('drawer-overlay').classList.add('open');
+  $('dr-title').textContent = 'Carregando…';
+  $('dr-body').innerHTML = '<div class="skeleton" style="height:180px;"></div>';
+  try {
+    const d = await api('/api/position/' + pid);
+    const p = d.position;
+    const endDate = d.market?.end_date;
+    const isWin = !p.is_open && p.close_reason === 'resolved' && p.realized_pnl > 0;
+    const isLoss = !p.is_open && p.close_reason === 'resolved' && p.realized_pnl < 0;
+    const isSold = p.close_reason === 'sold';
+    const statusBadge = p.is_open
+      ? '<span class="badge live"><span class="dot"></span> ABERTA</span>'
+      : (isWin ? '<span class="badge ok">✓ GANHOU</span>'
+        : (isLoss ? '<span class="badge bad">✕ PERDEU</span>'
+          : (isSold ? '<span class="badge info">💱 VENDIDA</span>' : '<span class="badge">—</span>')));
+    const pnl = p.is_open ? (p.unrealized_pnl || 0) : (p.realized_pnl || 0);
+    const maxGain = (p.size || 0) * (1 - (p.avg_entry_price || 0));
+    const risk = (p.size || 0) * (p.avg_entry_price || 0);
+    const roi = p.avg_entry_price > 0 ? (1 - p.avg_entry_price) / p.avg_entry_price * 100 : 0;
+
+    // Timeline: open → fills → [close]
+    let timelineItems = [{
+      kind: 'info', time: p.opened_at,
+      title: `Posição aberta`, desc: `${p.size.toFixed(2)} tokens @ ${p.avg_entry_price.toFixed(3)}`,
+    }];
+    for (const t of d.trades || []) {
+      timelineItems.push({
+        kind: 'info', time: t.filled_at || t.created_at,
+        title: `${t.side} preenchido`,
+        desc: `${(t.executed_size || 0).toFixed(2)} @ ${(t.executed_price || 0).toFixed(3)} · slip ${(t.slippage ? (t.slippage * 100).toFixed(2) : '0')}%`,
+      });
+    }
+    if (!p.is_open) {
+      timelineItems.push({
+        kind: isWin ? 'win' : (isLoss ? 'loss' : 'sold'),
+        time: p.closed_at,
+        title: p.close_reason === 'resolved' ? (isWin ? '🏁 Mercado resolveu — GANHOU' : '🏁 Mercado resolveu — PERDEU') : '💱 Whale vendeu, bot copiou',
+        desc: `PnL ${fmt.usdSigned(p.realized_pnl)} · preço saída ${fmt.price(p.current_price)}`,
+      });
+    }
+
+    $('dr-title').textContent = p.market_title || '—';
+    $('dr-body').innerHTML = `
+      <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+        ${statusBadge}
+        <span class="badge">Outcome: <b style="color:var(--text);">${p.outcome || '—'}</b></span>
+      </div>
+
+      <h4>Resumo Financeiro</h4>
+      <div class="kv-grid">
+        <div class="k">Size</div><div class="v">${(p.size||0).toFixed(2)} tokens</div>
+        <div class="k">Entry médio</div><div class="v">${fmt.price(p.avg_entry_price)}</div>
+        <div class="k">Preço atual/saída</div><div class="v">${fmt.price(p.current_price)}</div>
+        <div class="k">Capital em risco</div><div class="v loss">${fmt.usd(risk)}</div>
+        <div class="k">Ganho potencial</div><div class="v ${p.avg_entry_price >= 0.99 ? 'dim' : 'gain'}">${p.avg_entry_price >= 0.99 ? '⚠️ sem upside' : '+' + fmt.usd(maxGain)}</div>
+        <div class="k">ROI máx se ganhar</div><div class="v ${p.avg_entry_price >= 0.99 ? 'dim' : 'gain'}">+${roi.toFixed(0)}%</div>
+        <div class="k">PnL ${p.is_open ? 'latente' : 'realizado'}</div><div class="v ${fmt.cls(pnl)}">${fmt.usdSigned(pnl)}</div>
+      </div>
+
+      <h4>Timeline</h4>
+      <div class="timeline">
+        ${timelineItems.map(i => `
+          <div class="tl-item ${i.kind}">
+            <div class="tl-time">${new Date(i.time).toISOString().replace('T',' ').substring(0,19)} UTC · ${fmt.time(i.time)}</div>
+            <div class="tl-title">${i.title}</div>
+            <div class="tl-desc">${i.desc}</div>
+          </div>
+        `).join('')}
+      </div>
+
+      <h4>Metadata</h4>
+      <div class="kv-grid">
+        <div class="k">Resolução prevista</div><div class="v">${endDate ? new Date(endDate).toISOString().substring(0,16).replace('T',' ') + ' UTC' : '—'}</div>
+        <div class="k">Whales origem</div><div class="v" style="font-size:10px;">${(p.source_wallets || []).map(w => `<a class="whale-link" href="https://polymarket.com/profile/${w}" target="_blank" rel="noopener" style="color:var(--info);">🐋 ${w.slice(0,8)}… ↗</a>`).join(' · ') || '—'}</div>
+        <div class="k">Condition ID</div><div class="v" style="font-size:10px;word-break:break-all;text-align:right;">${(p.condition_id || '').substring(0, 24)}…</div>
+      </div>
+
+      <h4>Links Externos</h4>
+      <a href="https://polymarket.com/${d.market?.slug ? 'event/' + d.market.slug : ''}" target="_blank" style="color:var(--info);font-size:12px;text-decoration:none;">→ Abrir no Polymarket</a>
+    `;
+  } catch (e) {
+    $('dr-body').innerHTML = '<div style="color:var(--loss);padding:20px;">Erro ao carregar: ' + e + '</div>';
+  }
+}
+function closeDrawer() {
+  $('drawer').classList.remove('open');
+  $('drawer-overlay').classList.remove('open');
+}
+$('dr-close').onclick = closeDrawer;
+$('drawer-overlay').onclick = closeDrawer;
+
+/* ============== RENDER: HISTOGRAM ============== */
+function renderHistogram(h) {
+  const wrap = $('hist-bars');
+  if (!h.bins || !h.bins.length) { wrap.innerHTML = '<div style="width:100%;text-align:center;color:var(--text-3);font-size:11px;">sem posições fechadas ainda</div>'; $('hist-axis').innerHTML = '<span>—</span><span>—</span>'; return; }
+  const maxCount = Math.max(...h.bins.map(b => b.count), 1);
+  wrap.innerHTML = h.bins.map(b => {
+    const pct = (b.count / maxCount * 100).toFixed(0);
+    const mid = (b.lo + b.hi) / 2;
+    const color = mid > 0 ? 'var(--gain)' : (mid < 0 ? 'var(--loss)' : 'var(--text-3)');
+    return `<div class="hist-bar" style="height:${pct}%;color:${color};" title="$${b.lo.toFixed(0)} a $${b.hi.toFixed(0)}: ${b.count}">
+      ${b.count > 0 ? `<div class="bar-tip">$${b.lo.toFixed(0)}–$${b.hi.toFixed(0)}: <b>${b.count}</b></div>` : ''}
+    </div>`;
+  }).join('');
+  $('hist-axis').innerHTML = `<span>$${h.min.toFixed(2)}</span><span>${h.count} fechadas</span><span>$${h.max.toFixed(2)}</span>`;
+}
+
+/* ============== RENDER: WHALES PERFORMANCE ============== */
+function renderWhales(list) {
+  const body = $('whales-table').querySelector('tbody');
+  if (!list.length) { body.innerHTML = '<tr><td colspan="3" style="text-align:center;padding:20px;color:var(--text-3);">aguardando atribuição</td></tr>'; return; }
+  body.innerHTML = list.slice(0, 20).map(w => {
+    const wrStr = w.wr != null ? w.wr.toFixed(0) + '%' : '—';
+    return `<tr>
+      <td><a class="whale-link" href="https://polymarket.com/profile/${w.address}" target="_blank" rel="noopener" title="Abrir perfil no Polymarket">🐋 <b>${w.name}</b><div style="font-size:10px;color:var(--text-3);font-family:var(--ff-mono);">${w.address.slice(0,10)}…${w.address.slice(-4)} ↗</div></a></td>
+      <td class="${fmt.cls(w.pnl)}">${fmt.usdSigned(w.pnl)}</td>
+      <td>${w.n} cop · WR ${wrStr}</td>
+    </tr>`;
+  }).join('');
+}
+
+/* ============== RENDER: HEATMAP ============== */
+function renderHeatmap(hm) {
+  const grid = hm.grid || [];
+  const counts = hm.counts || [];
+  const flat = grid.flat();
+  const hasData = flat.some(v => v !== 0);
+  if (!hasData) { $('heat-grid').innerHTML = '<div style="padding:20px;color:var(--text-3);font-size:11px;grid-column:span 25;">sem dados de resolução ainda — heatmap aparece quando houver posições fechadas</div>'; return; }
+  const absMax = Math.max(...flat.map(Math.abs), 1);
+  const dowLabels = ['Seg','Ter','Qua','Qui','Sex','Sáb','Dom'];
+  let html = '<span></span>'; // canto
+  for (let h = 0; h < 24; h++) html += `<span class="heat-label" style="font-size:9px;">${h.toString().padStart(2,'0')}</span>`;
+  for (let d = 0; d < 7; d++) {
+    html += `<span class="heat-label">${dowLabels[d]}</span>`;
+    for (let h = 0; h < 24; h++) {
+      const v = grid[d][h];
+      const c = counts[d][h];
+      const intensity = Math.abs(v) / absMax;
+      const bg = v > 0
+        ? `rgba(0, 214, 143, ${0.1 + intensity * 0.9})`
+        : (v < 0 ? `rgba(255, 51, 85, ${0.1 + intensity * 0.9})` : 'var(--surface-2)');
+      html += `<div class="heat-cell" style="background:${bg};">${c > 0 ? `<div class="tip">${dowLabels[d]} ${h}h · ${c} op · ${fmt.usdSigned(v)}</div>` : ''}</div>`;
+    }
+  }
+  $('heat-grid').innerHTML = html;
+}
+
+/* ============== KEYBOARD SHORTCUTS ============== */
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  const trigger = (sel) => { const b = document.querySelector(sel); if (b) b.click(); };
+  switch (e.key.toLowerCase()) {
+    case 'g': trigger('#filter-status button[data-status="win"]'); break;
+    case 'l': trigger('#filter-status button[data-status="loss"]'); break;
+    case 'o': trigger('#filter-status button[data-status="open"]'); break;
+    case 'a': trigger('#filter-status button[data-status="all"]'); break;
+    case '/': e.preventDefault(); $('filter-search').focus(); break;
+    case 'r': refresh(); loadEquity(equityHours); break;
+    case 'f': document.body.classList.toggle('focus-mode'); break;
+    case 'escape': closeDrawer(); document.body.classList.remove('focus-mode'); break;
+  }
+});
+
+/* ============== LEDGER ROW CLICK ============== */
+document.addEventListener('click', e => {
+  const tr = e.target.closest('#ledger-body tr[data-pid]');
+  if (tr) openDrawer(parseInt(tr.dataset.pid));
+});
+
+/* ============== NUMBER TWEEN (suave) ============== */
+const _lastValues = {};
+function tweenNumber(el, targetText, targetValue) {
+  const id = el.id;
+  const prev = _lastValues[id];
+  if (prev != null && typeof targetValue === 'number' && Math.abs(targetValue - prev) > 0.01) {
+    el.style.transition = 'color 0.3s ease';
+    const wasColor = el.style.color;
+    el.style.color = targetValue > prev ? 'var(--gain)' : 'var(--loss)';
+    setTimeout(() => { el.style.color = wasColor; }, 300);
+  }
+  el.textContent = targetText;
+  if (typeof targetValue === 'number') _lastValues[id] = targetValue;
+}
+
 /* ============== MAIN REFRESH LOOP ============== */
 async function refresh() {
   try {
@@ -875,10 +1173,22 @@ async function refresh() {
     renderInsights(ins);
   } catch (e) { console.error('refresh failed', e); }
 }
+async function refreshAnalytics() {
+  try {
+    const [h, w, hm] = await Promise.all([
+      api('/api/analytics/histogram'),
+      api('/api/analytics/whales'),
+      api('/api/analytics/heatmap'),
+    ]);
+    renderHistogram(h); renderWhales(w); renderHeatmap(hm);
+  } catch (e) { console.error('analytics failed', e); }
+}
 refresh();
 loadEquity(6);
+refreshAnalytics();
 setInterval(refresh, 5000);
 setInterval(() => loadEquity(equityHours), 30000);
+setInterval(refreshAnalytics, 60000);
 </script>
 </body>
 </html>
