@@ -48,6 +48,54 @@ def _parse_outcome_prices(market: dict) -> list[float] | None:
     return None
 
 
+async def _local_resolve_if_extreme(
+    conn: aiosqlite.Connection, position_id: int, condition_id: str,
+    outcome: str, size: float, avg_entry: float,
+) -> str | None:
+    """Fallback: usa DB local (current_price do price_updater + end_date do cache)
+    pra inferir resolução quando Gamma não expõe mais o mercado."""
+    from datetime import datetime, timezone
+    async with conn.execute(
+        "SELECT bp.current_price, m.end_date FROM bot_positions bp "
+        "LEFT JOIN market_metadata_cache m ON m.condition_id = bp.condition_id "
+        "WHERE bp.id=?", (position_id,),
+    ) as cur:
+        row = await cur.fetchone()
+    if not row:
+        return None
+    cur_price = float(row[0]) if row[0] else 0.0
+    end_iso = row[1]
+    if not end_iso:
+        return None
+    try:
+        end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+    end_passed_min = (datetime.now(timezone.utc) - end_dt).total_seconds() / 60.0
+    if end_passed_min < 2.0:
+        return None
+    if not (cur_price >= 0.99 or cur_price <= 0.01):
+        return None
+    # Inferido: preço em extremo + endDate passou
+    resolution_price = 1.0 if cur_price >= 0.99 else 0.0
+    realized_pnl = (resolution_price - avg_entry) * size
+    won = resolution_price > avg_entry
+    now = "datetime('now')"
+    await conn.execute(
+        f"UPDATE bot_positions SET is_open=0, closed_at={now}, "
+        "updated_at=" + now + ", current_price=?, realized_pnl=?, "
+        "unrealized_pnl=0, close_reason='resolved' WHERE id=?",
+        (resolution_price, realized_pnl, position_id),
+    )
+    log.info("position_resolved_local_fallback",
+             cid=condition_id[:12], outcome=outcome, cur_price=cur_price,
+             resolution_price=resolution_price, end_passed_min=end_passed_min,
+             realized_pnl=realized_pnl, won=won)
+    return "won" if won else "lost"
+
+
 async def _resolve_position(
     conn: aiosqlite.Connection,
     gamma: GammaAPIClient,
@@ -62,9 +110,13 @@ async def _resolve_position(
     try:
         market = await gamma.get_market(condition_id, force_refresh=True)
     except Exception as exc:  # noqa: BLE001
-        log.warning("resolution_gamma_failed",
-                    cid=condition_id[:12], err=repr(exc))
-        return None
+        # Gamma 404 = mercado resolveu e saiu do filtro active=true. Usa
+        # nosso DB (price_updater + cache endDate) pra inferir.
+        log.info("resolution_gamma_not_found_trying_local",
+                 cid=condition_id[:12], err=repr(exc)[:80])
+        return await _local_resolve_if_extreme(
+            conn, position_id, condition_id, outcome, size, avg_entry,
+        )
 
     closed = bool(market.get("closed")) or bool(market.get("resolved"))
 
