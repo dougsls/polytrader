@@ -668,9 +668,9 @@ function renderOpenPositionsTable(list) {
     '<th title="Preço atual do outcome no mercado (atualiza a cada 30s)">Atual</th>' +
     '<th title="PnL não-realizado em USD: (preço_atual - entry) × size">PnL $</th>' +
     '<th title="Variação percentual desde a entrada">PnL %</th>' +
-    '<th title="Lucro MÁXIMO possível se o outcome ganhar: size × (1 - entry). Cada token vale $1 na vitória.">Pode Ganhar $</th>' +
-    '<th title="ROI máximo se o outcome ganhar: (1 - entry) / entry × 100%">Pode Ganhar %</th>' +
-    '<th title="Risco MÁXIMO de perda se o outcome perder: size × entry (todo capital investido na posição)">Pode Perder $</th>' +
+    '<th title="Lucro líquido MÁXIMO se o outcome vencer. Fórmula: size × (1 - entry). Cada token paga $1 na vitória.">Lucro Máx $</th>' +
+    '<th title="Retorno % máximo sobre o capital investido se vencer. Fórmula: (1 - entry) / entry × 100. Entry alto = pouco upside.">ROI Máx %</th>' +
+    '<th title="Capital total em risco. Se o outcome perder, esta posição vai para zero. Fórmula: size × entry.">Capital em Risco</th>' +
     '<th title="Tempo até o mercado resolver e definirmos vitória/derrota">Resolve em</th>' +
     '<th title="Tempo desde que a primeira ordem foi preenchida">Aberta há</th></tr></thead><tbody>';
   for (const p of list) {
@@ -685,9 +685,21 @@ function renderOpenPositionsTable(list) {
       <td data-label="Atual" class="mono">${p.current_price ? p.current_price.toFixed(3) : '—'}</td>
       <td data-label="PnL $" class="mono ${cls}">${fmt.pnlPrefix(p.unrealized_pnl)}${fmt.usd(p.unrealized_pnl)}</td>
       <td data-label="PnL %" class="mono ${pctCls}">${fmt.pnlPrefix(p.pct_pnl)}${p.pct_pnl != null ? p.pct_pnl.toFixed(1) + '%' : '—'}</td>
-      <td data-label="Pode Ganhar $" class="mono positive">+$${(p.size && p.avg_entry_price != null) ? (p.size * (1 - p.avg_entry_price)).toFixed(2) : '—'}</td>
-      <td data-label="Pode Ganhar %" class="mono positive">+${(p.avg_entry_price && p.avg_entry_price > 0) ? ((1 - p.avg_entry_price) / p.avg_entry_price * 100).toFixed(0) + '%' : '—'}</td>
-      <td data-label="Pode Perder $" class="mono negative">-$${(p.size && p.avg_entry_price != null) ? (p.size * p.avg_entry_price).toFixed(2) : '—'}</td>
+      ${(() => {
+        const e = p.avg_entry_price, s = p.size;
+        if (!s || e == null) return '<td>—</td><td>—</td><td>—</td>';
+        const maxGain = s * (1 - e);
+        const roi = e > 0 ? (1 - e) / e * 100 : 0;
+        const risk = s * e;
+        const noUpside = e >= 0.99;
+        const gainCell = noUpside
+          ? `<td data-label="Lucro Máx $" class="mono neutral" title="Entry ≥ 0.99 — sem upside, posição comprada no teto">⚠️ $${maxGain.toFixed(2)}</td>`
+          : `<td data-label="Lucro Máx $" class="mono positive">+$${maxGain.toFixed(2)}</td>`;
+        const roiCell = noUpside
+          ? `<td data-label="ROI Máx %" class="mono neutral">${roi.toFixed(1)}%</td>`
+          : `<td data-label="ROI Máx %" class="mono positive">+${roi.toFixed(0)}%</td>`;
+        return gainCell + roiCell + `<td data-label="Capital em Risco" class="mono negative">$${risk.toFixed(2)}</td>`;
+      })()}
       <td data-label="Resolve em" class="mono">${resolveBadge(p.hours_to_resolution)}</td>
       <td data-label="Aberta há" class="mono neutral">${fmt.time(p.opened_at)}</td>
     </tr>`;
