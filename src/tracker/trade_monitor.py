@@ -84,6 +84,28 @@ class TradeMonitor:
         while len(self._seen) > self._seen_max_size:
             self._seen.popitem(last=False)
 
+    async def _persist_signal(self, signal) -> None:
+        """INSERT em trade_signals — sem isso UPDATEs subsequentes são no-op."""
+        values = (
+            signal.id, signal.wallet_address, signal.wallet_score,
+            signal.condition_id, signal.token_id, signal.side, signal.size,
+            signal.price, signal.usd_value, signal.market_title, signal.outcome,
+            signal.market_end_date.isoformat() if signal.market_end_date else None,
+            signal.hours_to_resolution,
+            signal.detected_at.isoformat(),
+            signal.source, signal.status,
+        )
+        sql = (
+            "INSERT OR IGNORE INTO trade_signals "
+            "(id, wallet_address, wallet_score, condition_id, token_id, side, "
+            " size, price, usd_value, market_title, outcome, market_end_date, "
+            " hours_to_resolution, detected_at, source, status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        if self._conn is not None:
+            await self._conn.execute(sql, values)
+            await self._conn.commit()
+
     async def _enqueue_trade(self, trade: dict, source: str) -> None:
         """Fluxo comum: dedup → detect_signal → enqueue com backpressure."""
         key = self._dedup_key(trade)
@@ -101,6 +123,9 @@ class TradeMonitor:
         )
         if not signal:
             return
+        # Persiste em trade_signals ANTES de enfileirar.
+        # Sem isso, copy_engine._mark_skipped (UPDATE) seria no-op.
+        await self._persist_signal(signal)
         try:
             self._queue.put_nowait(signal)
             metrics.signals_received.inc()
