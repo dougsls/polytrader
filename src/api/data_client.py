@@ -103,8 +103,9 @@ class DataAPIClient:
         side: str | None = None,
         start: int | None = None,
         end: int | None = None,
+        limit: int = 50,
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"user": user, "type": type}
+        params: dict[str, Any] = {"user": user, "type": type, "limit": limit}
         if side:
             params["side"] = side
         if start is not None:

@@ -162,9 +162,12 @@ class TradeMonitor:
                 if not whales:
                     await asyncio.sleep(interval)
                     continue
-                # Paralelo: pega últimos N trades de cada whale.
+                # /activity?type=TRADE é o feed real-time da Polymarket.
+                # /trades tem lag de 30-60min — bug conhecido do endpoint.
+                # Validado empiricamente: /trades retornou trade de 43min atrás
+                # enquanto /activity tinha trade de 19s atrás (mesma whale).
                 results = await asyncio.gather(
-                    *[self._data.trades(w, limit=10) for w in whales],
+                    *[self._data.activity(w, type="TRADE", limit=10) for w in whales],
                     return_exceptions=True,
                 )
                 for wallet, res in zip(whales, results, strict=False):
