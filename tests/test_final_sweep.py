@@ -176,7 +176,7 @@ def test_synthetic_sell_signal_bypass_confidence():
 
 def test_watchdog_terminal_status_detection():
     assert _is_terminal("filled") is True
-    assert _is_terminal("MATCHED") is True
+    assert _is_terminal("MATCHED") is False
     assert _is_terminal("cancelled") is True
     assert _is_terminal("canceled") is True
     assert _is_terminal("rejected") is True

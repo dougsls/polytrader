@@ -102,6 +102,17 @@ class CLOBClient:
             raise RuntimeError("signed_client não foi injetado — CLOB em modo read-only")
         return self._signed
 
+    def _auth_signers(self) -> list[Any]:
+        signers: list[Any] = []
+        for signer in (self._signed, self._signed_neg_risk):
+            if signer is None:
+                continue
+            if signer not in signers:
+                signers.append(signer)
+        if not signers:
+            raise RuntimeError("signed_client não foi injetado — CLOB em modo read-only")
+        return signers
+
     @retry_on_425()
     async def post_order(
         self, draft: OrderDraft, order_type: str = "GTC",
@@ -163,3 +174,31 @@ class CLOBClient:
                 "py-clob-client não disponível. Instale com `uv sync` e "
                 "garanta que signed_client foi injetado no startup."
             ) from e
+
+    async def get_order(self, order_id: str) -> dict[str, Any]:
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        last_exc: Exception | None = None
+        for signer in self._auth_signers():
+            try:
+                return await loop.run_in_executor(None, lambda s=signer: s.get_order(order_id))
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("nenhum signer disponível para get_order")
+
+    async def cancel_order(self, order_id: str) -> dict[str, Any] | None:
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        last_exc: Exception | None = None
+        for signer in self._auth_signers():
+            try:
+                return await loop.run_in_executor(None, lambda s=signer: s.cancel(order_id))
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+        return None

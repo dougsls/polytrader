@@ -13,7 +13,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 Side = Literal["BUY", "SELL"]
 SignalStatus = Literal["pending", "executing", "executed", "skipped", "failed"]
-TradeStatus = Literal["pending", "submitted", "filled", "partial", "failed", "cancelled"]
+TradeStatus = Literal[
+    "pending",
+    "submitted",
+    "filled",
+    "partial",
+    "failed",
+    "cancelled",
+    "rejected",
+]
 SignalSource = Literal["polling", "websocket"]
 
 

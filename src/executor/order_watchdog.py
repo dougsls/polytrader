@@ -9,6 +9,7 @@ A verificação do status usa o SDK síncrono via run_in_executor.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from src.api.clob_client import CLOBClient
@@ -21,7 +22,7 @@ log = get_logger(__name__)
 
 def _is_terminal(status: str) -> bool:
     """Filled/cancelled/rejected = não precisa mais watchdog."""
-    return status.lower() in ("matched", "filled", "cancelled", "canceled", "rejected")
+    return status.lower() in ("filled", "cancelled", "canceled", "rejected")
 
 
 async def watchdog_order(
@@ -31,6 +32,7 @@ async def watchdog_order(
     draft: OrderDraft,
     timeout_s: int = 30,
     poll_interval_s: float = 2.0,
+    on_reposted: Callable[[str], Awaitable[None]] | None = None,
 ) -> dict[str, Any] | None:
     """Monitora ordem GTC. Se timeout, cancela + reenvia FOK.
 
@@ -40,16 +42,12 @@ async def watchdog_order(
     """
     if order_id == "":
         return None
-    signer = clob._pick_signer(draft)
-    loop = asyncio.get_running_loop()
     deadline = asyncio.get_event_loop().time() + timeout_s
 
     while asyncio.get_event_loop().time() < deadline:
         await asyncio.sleep(poll_interval_s)
         try:
-            status_resp: dict[str, Any] = await loop.run_in_executor(
-                None, lambda: signer.get_order(order_id),
-            )
+            status_resp = await clob.get_order(order_id)
         except Exception as exc:  # noqa: BLE001
             log.warning("watchdog_status_check_failed", order_id=order_id, err=repr(exc))
             continue
@@ -61,13 +59,17 @@ async def watchdog_order(
     log.warning("watchdog_timeout_firing_fok_fallback", order_id=order_id)
     # 1. Cancela original
     try:
-        await loop.run_in_executor(None, lambda: signer.cancel(order_id))
+        await clob.cancel_order(order_id)
     except Exception as exc:  # noqa: BLE001
         log.warning("watchdog_cancel_failed", err=repr(exc))
 
     # 2. Repost como FOK (retorna dict ou levanta PolymarketAPIError)
     try:
-        return await clob.post_order(draft, order_type="FOK")
+        resp = await clob.post_order(draft, order_type="FOK")
+        new_order_id = resp.get("orderID") or resp.get("orderId") or ""
+        if on_reposted is not None and new_order_id:
+            await on_reposted(new_order_id)
+        return resp
     except PolymarketAPIError as exc:
         log.error("fok_fallback_also_failed", err=repr(exc))
         return None

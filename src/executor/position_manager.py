@@ -29,6 +29,10 @@ async def apply_fill(
     trade: CopyTrade,
     executed_size: float,
     executed_price: float,
+    trade_executed_size: float | None = None,
+    trade_executed_price: float | None = None,
+    trade_status: str = "filled",
+    filled_at: str | None = None,
     db_path: Path = DEFAULT_DB_PATH,
     state: InMemoryState | None = None,
     conn: aiosqlite.Connection | None = None,
@@ -40,10 +44,9 @@ async def apply_fill(
     Se `conn` for fornecido, reutiliza a conexão compartilhada (economiza
     ~200μs de thread-init por fill).
     """
-    if state is not None:
-        delta = executed_size if signal.side == "BUY" else -executed_size
-        state.bot_add(signal.token_id, delta)
-    now = datetime.now(timezone.utc).isoformat()
+    now = filled_at or datetime.now(timezone.utc).isoformat()
+    total_size = executed_size if trade_executed_size is None else trade_executed_size
+    total_price = executed_price if trade_executed_price is None else trade_executed_price
 
     async def _do_writes(db: aiosqlite.Connection) -> None:
         async with db.execute(
@@ -114,11 +117,22 @@ async def apply_fill(
 
         await db.execute(
             "UPDATE copy_trades SET executed_size=?, executed_price=?, "
-            "slippage=?, status='filled', filled_at=? WHERE id=?",
+            "slippage=?, status=?, filled_at=?, updated_at=? WHERE id=?",
             (
-                executed_size, executed_price,
-                (executed_price / signal.price - 1.0) if signal.price > 0 else None,
-                now, trade.id,
+                total_size,
+                total_price,
+                (total_price / signal.price - 1.0) if signal.price > 0 else None,
+                trade_status,
+                (
+                    now
+                    if trade_status == "filled"
+                    else (
+                        trade.filled_at.isoformat()
+                        if trade.filled_at is not None else None
+                    )
+                ),
+                now,
+                trade.id,
             ),
         )
         await db.commit()
@@ -128,3 +142,7 @@ async def apply_fill(
     else:
         async with get_connection(db_path) as db:
             await _do_writes(db)
+
+    if state is not None:
+        delta = executed_size if signal.side == "BUY" else -executed_size
+        state.bot_add(signal.token_id, delta)

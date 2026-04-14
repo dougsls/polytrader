@@ -22,6 +22,7 @@ from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.api.http import close_http_client, prewarm_connections
 from src.api.startup_checks import check_geoblock, latency_baseline
+from src.api.user_ws_client import UserWSClient
 from src.api.websocket_client import RTDSClient
 from src.core.config import get_settings
 from src.core.database import DEFAULT_DB_PATH, init_database, open_shared_connection
@@ -31,6 +32,7 @@ from src.core.state import InMemoryState
 from src.dashboard.app import build_app as build_dashboard
 from src.executor.balance_cache import BalanceCache
 from src.executor.copy_engine import CopyEngine
+from src.executor.live_orders import LiveOrderTracker
 from src.executor.position_sync import reconcile_bot_positions
 from src.executor.price_updater import price_update_loop
 from src.executor.resolution_watcher import resolution_check_loop
@@ -209,6 +211,7 @@ async def amain() -> None:
     # CLOB fica read-only (post_order cairá em NotImplementedError, que o
     # CopyEngine converte em skip_reason=LIVE_NOT_WIRED).
     clob = CLOBClient()
+    signed_creds = None
     if settings.config.executor.mode == "live" and settings.env.private_key:
         try:
             signed = await prefetch_credentials(
@@ -216,6 +219,7 @@ async def amain() -> None:
                 funder=settings.env.funder_address,
                 signature_type=settings.env.signature_type,
             )
+            signed_creds = signed.credentials
             clob = CLOBClient(
                 signed_client=signed.standard,
                 neg_risk_signed_client=signed.neg_risk,
@@ -228,6 +232,7 @@ async def amain() -> None:
     # --- pool, scanner & tracker -----------------------------------------
     wallet_pool = WalletPool(settings.config.scanner, db_path=DEFAULT_DB_PATH)
     active_wallets: set[str] = set()
+    live_condition_ids: set[str] = set()
     wallet_scores: dict[str, float] = {}
     wallet_portfolios: dict[str, float] = {}
     rtds = RTDSClient(active_wallets)
@@ -278,6 +283,12 @@ async def amain() -> None:
     live_state: dict[str, _RS] = {
         "rs": await build_risk_state(balance_cache=balance_cache, conn=shared_conn)
     }
+    live_order_tracker = LiveOrderTracker(
+        conn=shared_conn,
+        state=state,
+        db_path=DEFAULT_DB_PATH,
+        condition_ids=live_condition_ids,
+    )
 
     async def reconcile_loop() -> None:
         """Reconcilia bot_positions vs on-chain a cada 30min (live-only).
@@ -305,6 +316,7 @@ async def amain() -> None:
                     conn=shared_conn,
                     state=state,
                 )
+                await live_order_tracker.reconcile_open_orders(clob=clob)
                 if stats["added"] or stats["updated"] or stats["closed"]:
                     notifier.notify(
                         f"🔄 Periodic reconcile: +{stats['added']} / "
@@ -312,6 +324,12 @@ async def amain() -> None:
                     )
             except Exception as exc:  # noqa: BLE001
                 log.warning("periodic_reconcile_failed", err=repr(exc))
+
+    if settings.config.executor.mode == "live":
+        try:
+            await live_order_tracker.reconcile_open_orders(clob=clob)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("open_order_recovery_failed", err=repr(exc))
 
     # Estado de alerta do balance cache — evita spam de notificação
     # (dispara 1x ao envelhecer, 1x ao recuperar).
@@ -354,6 +372,7 @@ async def amain() -> None:
         queue=signal_queue, state=state,
         risk_state_provider=lambda: live_state["rs"],
         on_event=on_event, conn=shared_conn,
+        live_order_tracker=live_order_tracker if settings.config.executor.mode == "live" else None,
     )
 
     # --- graceful shutdown ------------------------------------------------
@@ -398,6 +417,14 @@ async def amain() -> None:
         await original_on_event(kind, sig, tr)
 
     engine._on_event = on_event_with_halt  # re-wire após build
+    user_ws: UserWSClient | None = None
+    if settings.config.executor.mode == "live" and signed_creds is not None:
+        user_ws = UserWSClient(
+            credentials=signed_creds,
+            on_event=live_order_tracker.handle_user_message,
+            condition_ids=live_condition_ids,
+        )
+        live_order_tracker.set_subscription_callback(user_ws.refresh_subscription)
 
     tasks = [
         asyncio.create_task(heartbeat_loop(shutdown), name="heartbeat"),
@@ -444,6 +471,8 @@ async def amain() -> None:
             name="daily-summary",
         ),
     ]
+    if user_ws is not None:
+        tasks.append(asyncio.create_task(user_ws.run(), name="user-ws"))
 
     notifier.notify(
         f"🟢 PolyTrader online | mode={settings.config.executor.mode} "
@@ -454,6 +483,8 @@ async def amain() -> None:
     log.info("shutting_down")
 
     await rtds.close()
+    if user_ws is not None:
+        await user_ws.close()
     await scanner.stop()
     await balance_cache.stop()
     dashboard_server.should_exit = True

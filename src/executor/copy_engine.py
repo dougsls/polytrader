@@ -31,6 +31,7 @@ from src.core import metrics
 from src.core.models import CopyTrade, RiskState, TradeSignal
 from src.core.state import InMemoryState
 from src.executor.exposure import would_breach_tag_cap
+from src.executor.live_orders import LiveOrderTracker
 from src.executor.order_manager import build_draft
 from src.executor.order_watchdog import watchdog_order
 from src.executor.position_manager import apply_fill
@@ -58,6 +59,7 @@ class CopyEngine:
         on_event: NotifyCallback = None,
         db_path: Path = DEFAULT_DB_PATH,
         conn: aiosqlite.Connection | None = None,
+        live_order_tracker: LiveOrderTracker | None = None,
     ) -> None:
         self._cfg = cfg
         self._clob = clob
@@ -69,6 +71,7 @@ class CopyEngine:
         self._on_event = on_event
         self._db_path = db_path
         self._conn = conn
+        self._live_order_tracker = live_order_tracker
 
     async def _mark_trade_failed(self, trade_id: str, error: str) -> None:
         """C2 — Atualiza copy_trades.status='failed' quando post_order rejeita."""
@@ -190,13 +193,29 @@ class CopyEngine:
                     draft, order_type=self._cfg.default_order_type,
                 )
                 self._risk.record_post_success()
+                order_id = post_resp.get("orderID") or post_resp.get("orderId") or ""
+                if self._live_order_tracker is not None and order_id:
+                    await self._live_order_tracker.record_submitted_order(
+                        trade_id=trade.id,
+                        signal_id=signal.id,
+                        condition_id=signal.condition_id,
+                        order_id=order_id,
+                    )
                 # H3 — FOK watchdog fire-and-forget (não bloqueia pipeline).
                 if self._cfg.fok_fallback and post_resp:
-                    order_id = post_resp.get("orderID") or post_resp.get("orderId") or ""
                     if order_id:
                         asyncio.create_task(watchdog_order(
                             clob=self._clob, order_id=order_id, draft=draft,
                             timeout_s=self._cfg.fok_fallback_timeout_seconds,
+                            on_reposted=(
+                                None
+                                if self._live_order_tracker is None
+                                else lambda new_order_id: self._live_order_tracker.replace_active_order(
+                                    trade_id=trade.id,
+                                    condition_id=signal.condition_id,
+                                    order_id=new_order_id,
+                                )
+                            ),
                         ), name=f"watchdog-{order_id[:8]}")
             except NotImplementedError:
                 log.error("live_mode_not_wired", signal_id=signal.id)
@@ -212,6 +231,7 @@ class CopyEngine:
                     await self._on_event("risk_halt", signal, None)
                 await self._mark_skipped(signal, skip_reason)
                 return
+            return
         elif self._cfg.mode == "dry-run":
             log.info("dry_run_skip_post", trade_id=trade.id)
             return
