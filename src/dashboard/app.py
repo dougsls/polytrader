@@ -252,13 +252,13 @@ def build_app(
             "       bp.outcome, bp.size, bp.avg_entry_price, bp.current_price, "
             "       bp.unrealized_pnl, bp.realized_pnl, bp.is_open, "
             "       bp.source_wallets_json, bp.opened_at, bp.closed_at, "
-            "       m.end_date "
+            "       m.end_date, bp.close_reason "
             "FROM bot_positions bp "
             "LEFT JOIN market_metadata_cache m ON m.condition_id = bp.condition_id "
             "WHERE bp.is_open=1 "
             "   OR (bp.is_open=0 AND bp.closed_at >= datetime('now', '-30 days')) "
             "ORDER BY bp.is_open DESC, COALESCE(bp.closed_at, bp.opened_at) DESC "
-            "LIMIT 50"
+            "LIMIT 100"
         )
         async with shared_conn.execute(sql) as cur:
             rows = await cur.fetchall()
@@ -280,9 +280,16 @@ def build_app(
             pct_pnl = (current - entry) / entry * 100 if entry > 0 else 0.0
             is_open = bool(r[10])
             realized = float(r[9]) if r[9] else 0.0
+            close_reason = r[15]  # 'sold' | 'resolved' | None (legacy)
             outcome_result = None
             if not is_open:
-                outcome_result = "won" if realized > 0 else ("lost" if realized < 0 else "neutral")
+                if close_reason == "resolved":
+                    outcome_result = "won" if realized > 0 else "lost"
+                elif close_reason == "sold":
+                    outcome_result = "sold"  # whale vendeu, bot copiou
+                else:
+                    # Legacy positions sem close_reason: inferir por PnL
+                    outcome_result = "won" if realized > 0 else ("lost" if realized < 0 else "sold")
             item = {
                 "id": r[0], "condition_id": r[1], "token_id": r[2],
                 "market_title": r[3], "outcome": r[4],
@@ -290,6 +297,7 @@ def build_app(
                 "current_price": r[7], "unrealized_pnl": r[8],
                 "realized_pnl": realized, "pct_pnl": pct_pnl,
                 "is_open": is_open, "outcome_result": outcome_result,
+                "close_reason": close_reason,
                 "source_wallets_json": r[11],
                 "opened_at": r[12], "closed_at": r[13],
                 "end_date": end_date_raw, "hours_to_resolution": hours_left,

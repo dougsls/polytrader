@@ -101,7 +101,8 @@ async def apply_fill(
                 await db.execute(
                     "UPDATE bot_positions SET size=0, is_open=0, "
                     "closed_at=?, updated_at=?, current_price=?, "
-                    "realized_pnl=COALESCE(realized_pnl,0)+? WHERE id=?",
+                    "realized_pnl=COALESCE(realized_pnl,0)+?, "
+                    "close_reason='sold' WHERE id=?",
                     (now, now, executed_price, sell_pnl, row[0]),
                 )
             else:

@@ -709,29 +709,43 @@ function renderOpenPositionsTable(list) {
 
 function renderClosedPositionsTable(list) {
   let html = '<table class="data-table"><thead><tr>' +
-    '<th title="Mercado onde tivemos posição (já resolvido)">Mercado</th>' +
+    '<th title="Mercado da posição já fechada">Mercado</th>' +
     '<th title="Outcome apostado: Yes ou No">Outcome</th>' +
-    '<th title="Quantidade de tokens que detínhamos no fechamento">Size</th>' +
-    '<th title="Preço médio ponderado de entrada">Entry</th>' +
-    '<th title="Data/hora em que o mercado resolveu na Polymarket">Resolveu</th>' +
-    '<th title="GANHOU = outcome venceu (recebemos $1/token) / PERDEU = outcome perdeu (zero)">Resultado</th>' +
-    '<th title="Lucro/prejuízo realizado em USD após resolução do mercado">PnL Realizado</th>' +
+    '<th title="Por que a posição foi fechada: VENDIDA = whale vendeu (bot copiou) | RESOLVIDA = mercado decidiu o vencedor">Como Fechou</th>' +
+    '<th title="Resultado: GANHOU/PERDEU só aparece quando o mercado resolveu de fato. VENDIDA mostra se a saída deu lucro ou prejuízo.">Resultado</th>' +
+    '<th title="Preço médio de entrada">Entry</th>' +
+    '<th title="Preço de saída: preço da venda (sold) ou preço de resolução (resolved: 1.0=ganhou, 0.0=perdeu)">Saída</th>' +
+    '<th title="Lucro/prejuízo realizado em USD: (saída - entry) × size">PnL Realizado</th>' +
     '<th title="Tempo desde o fechamento da posição">Fechada há</th></tr></thead><tbody>';
   for (const p of list) {
     const cls = fmt.pnlClass(p.realized_pnl);
     const title = p.market_title || '—';
-    const resultPill = p.outcome_result === 'won'
-      ? '<span class="pill executed">✓ GANHOU</span>'
-      : p.outcome_result === 'lost'
-        ? '<span class="pill failed">✕ PERDEU</span>'
-        : '<span class="pill skipped">—</span>';
+    const reasonPill = p.close_reason === 'resolved'
+      ? '<span class="pill executed" title="Mercado resolveu — outcome decidido">🏁 RESOLVIDA</span>'
+      : p.close_reason === 'sold'
+        ? '<span class="pill skipped" title="Whale vendeu antes da resolução; bot copiou a venda">💱 VENDIDA</span>'
+        : '<span class="pill neutral">—</span>';
+    let resultPill;
+    if (p.close_reason === 'resolved') {
+      resultPill = p.outcome_result === 'won'
+        ? '<span class="pill executed">✓ GANHOU</span>'
+        : '<span class="pill failed">✕ PERDEU</span>';
+    } else if (p.close_reason === 'sold') {
+      resultPill = (p.realized_pnl || 0) > 0
+        ? '<span class="pill executed">↑ Lucro venda</span>'
+        : (p.realized_pnl || 0) < 0
+          ? '<span class="pill failed">↓ Prej. venda</span>'
+          : '<span class="pill skipped">≈ Break-even</span>';
+    } else {
+      resultPill = '<span class="pill skipped">—</span>';
+    }
     html += `<tr>
       <td data-label="Mercado" class="truncate" title="${title.replace(/"/g,'&quot;')}">${title.slice(0,60)}</td>
       <td data-label="Outcome"><b>${p.outcome || '—'}</b></td>
-      <td data-label="Size" class="mono">${p.size ? p.size.toFixed(2) : '—'}</td>
-      <td data-label="Entry" class="mono">${p.avg_entry_price ? p.avg_entry_price.toFixed(3) : '—'}</td>
-      <td data-label="Resolveu" class="mono">${p.current_price != null ? p.current_price.toFixed(2) : '—'}</td>
+      <td data-label="Como Fechou">${reasonPill}</td>
       <td data-label="Resultado">${resultPill}</td>
+      <td data-label="Entry" class="mono">${p.avg_entry_price ? p.avg_entry_price.toFixed(3) : '—'}</td>
+      <td data-label="Saída" class="mono">${p.current_price != null ? p.current_price.toFixed(3) : '—'}</td>
       <td data-label="PnL Realizado" class="mono ${cls}">${fmt.pnlPrefix(p.realized_pnl)}${fmt.usd(p.realized_pnl)}</td>
       <td data-label="Fechada há" class="mono neutral">${fmt.time(p.closed_at)}</td>
     </tr>`;

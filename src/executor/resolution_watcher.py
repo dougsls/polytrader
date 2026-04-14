@@ -102,7 +102,7 @@ async def _resolve_position(
     await conn.execute(
         f"UPDATE bot_positions SET is_open=0, closed_at={now}, "
         "updated_at=" + now + ", current_price=?, realized_pnl=?, "
-        "unrealized_pnl=0 WHERE id=?",
+        "unrealized_pnl=0, close_reason='resolved' WHERE id=?",
         (resolution_price, realized_pnl, position_id),
     )
     log.info(
