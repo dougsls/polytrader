@@ -120,49 +120,17 @@ async def _resolve_position(
 
     closed = bool(market.get("closed")) or bool(market.get("resolved"))
 
-    # INFERÊNCIA POR PREÇO: Polymarket UMA oracle pode levar 15-60min pra
-    # settle após endDate. Durante esse gap, 'closed'=false mas mercado
-    # já decidiu — preço colapsa pra 0.99+ (vencedor) ou 0.01- (perdedor).
-    # Se endDate já passou +2min e preço está em extremo, inferimos localmente.
+    # INFERÊNCIA POR PREÇO (mesmo com Gamma retornando closed=false).
+    # Polymarket UMA oracle pode levar 15-60min pra settle após endDate.
+    # Durante esse gap, Gamma: closed=false, lastTradePrice stale. MAS o
+    # NOSSO current_price (via price_updater + CLOB /price) já mostra 1.0
+    # ou 0.0. Usamos nosso DB como source-of-truth.
     if not closed:
-        from datetime import datetime, timezone
-        end_iso = (market.get("endDate") or market.get("end_date_iso")
-                   or market.get("end_date"))
-        if end_iso:
-            try:
-                end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
-                end_passed_min = (now - end_dt).total_seconds() / 60.0
-                cur_price = float(market.get("lastTradePrice") or 0.0)
-                if end_passed_min >= 2.0 and (cur_price >= 0.99 or cur_price <= 0.01):
-                    log.info("resolution_inferred_by_price",
-                             cid=condition_id[:12], cur_price=cur_price,
-                             end_passed_min=end_passed_min)
-                    closed = True  # cai no fluxo normal usando lastTradePrice
-                    # Sintetiza prices/outcomes se gamma ainda não expõe
-                    if not _parse_outcome_prices(market):
-                        # winner = outcome cujo token está em ~1.0
-                        outs = market.get("outcomes")
-                        if isinstance(outs, str):
-                            try:
-                                outs = json.loads(outs)
-                            except json.JSONDecodeError:
-                                outs = None
-                        if isinstance(outs, list) and len(outs) == 2:
-                            # Encontra qual outcome é o nosso (tem preço extremo)
-                            is_winner = cur_price >= 0.99
-                            our_idx = next((i for i, o in enumerate(outs)
-                                            if str(o).lower() == str(outcome).lower()), None)
-                            if our_idx is not None:
-                                prices = [0.0, 0.0]
-                                prices[our_idx] = 1.0 if is_winner else 0.0
-                                prices[1 - our_idx] = 0.0 if is_winner else 1.0
-                                market["outcomePrices"] = json.dumps([str(p) for p in prices])
-            except Exception as exc:  # noqa: BLE001
-                log.debug("resolution_infer_failed",
-                          cid=condition_id[:12], err=repr(exc))
-
-    if not closed:
+        local = await _local_resolve_if_extreme(
+            conn, position_id, condition_id, outcome, size, avg_entry,
+        )
+        if local is not None:
+            return local  # fechou por inferência local
         return "still_open"
 
     prices = _parse_outcome_prices(market)
