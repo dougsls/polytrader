@@ -6,7 +6,7 @@ scanner:
   min_profit_usd: 500
   min_win_rate: 0.55
   min_trades: 10
-  max_wallets_tracked: 20
+  max_wallets_tracked: 21  # 20 originais + CryptoWhale (top cripto)
 
   scoring_weights:
     pnl: 0.25
