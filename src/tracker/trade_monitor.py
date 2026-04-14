@@ -155,10 +155,16 @@ class TradeMonitor:
                             continue
                         if ts > max_ts:
                             max_ts = ts
-                        # Injeta maker se ausente (endpoint retorna user)
+                        # Injeta maker se ausente (endpoint retorna proxyWallet)
                         if "maker" not in t:
                             t["maker"] = wallet
-                        await self._enqueue_trade(t, source="polling")
+                        try:
+                            await self._enqueue_trade(t, source="polling")
+                        except Exception as exc:  # noqa: BLE001
+                            # Mercado unknown na Gamma, spread falho, etc.
+                            # Não queremos que 1 trade ruim quebre o loop de 20 whales.
+                            log.info("polling_trade_skipped",
+                                     wallet=wallet[:10], err=str(exc)[:60])
                     last_seen_ts[wallet] = max_ts
             except Exception as exc:  # noqa: BLE001
                 log.error("polling_loop_crash", err=repr(exc))
