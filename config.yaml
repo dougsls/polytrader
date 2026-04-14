@@ -81,12 +81,14 @@ executor:
   min_price: 0.05
   max_price: 0.95
   avoid_resolved_markets: true
-  # Regra 1 — Anti-Slippage Anchoring (aborta se best_ask > whale_price * 1.03)
-  whale_max_slippage_pct: 0.03
-  # Paper: spread até 50¢ pra permitir fake-fills visíveis (mercados
-  # históricos têm spread largo). Em LIVE: 0.02 (2¢) pra rejeitar pool
-  # ilíquido.
-  max_spread: 0.50
+  # Paper: 0.50 (50% tolerance, muito permissivo). LIVE: 0.03 (3%).
+  whale_max_slippage_pct: 0.50
+  # Paper: 1.0 (qualquer spread passa). Mercados históricos / quase-
+  # resolvidos têm ask=0.99 bid=0.01 = spread 0.98. Em LIVE: 0.02 (2¢)
+  # pra rejeitar pool ilíquido.
+  max_spread: 1.0
+  # Paper: relaxa slippage anchor para permitir trades históricos fluírem.
+  # Em LIVE: 0.03 pra copiar apenas quando preço ainda está perto da whale.
 
   default_order_type: "GTC"
   limit_price_offset: 0.02
