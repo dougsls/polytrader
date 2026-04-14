@@ -55,6 +55,23 @@ async def init_database(db_path: Path = DEFAULT_DB_PATH) -> None:
         await db.commit()
 
 
+async def open_shared_connection(
+    db_path: Path = DEFAULT_DB_PATH,
+) -> aiosqlite.Connection:
+    """Abre a conexão singleton compartilhada pelo processo inteiro.
+
+    Aplica os mesmos pragmas de `get_connection` — hot path writers
+    (tracker/executor) herdam synchronous=NORMAL + cache 16MB.
+    """
+    conn = await aiosqlite.connect(db_path)
+    await conn.execute("PRAGMA foreign_keys=ON;")
+    await conn.execute("PRAGMA wal_autocheckpoint=500;")
+    await conn.execute("PRAGMA synchronous=NORMAL;")
+    await conn.execute("PRAGMA temp_store=MEMORY;")
+    await conn.execute("PRAGMA cache_size=-16000;")
+    return conn
+
+
 @asynccontextmanager
 async def get_connection(db_path: Path = DEFAULT_DB_PATH) -> AsyncIterator[aiosqlite.Connection]:
     """Context manager: abre, configura e fecha uma conexão aiosqlite.
@@ -67,7 +84,12 @@ async def get_connection(db_path: Path = DEFAULT_DB_PATH) -> AsyncIterator[aiosq
     async with aiosqlite.connect(db_path) as conn:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys=ON;")
-        # wal_autocheckpoint é por-conexão. Aplicado em todo writer evita
-        # que .db-wal inche entre checkpoints longos do init.
+        # wal_autocheckpoint por-conexão — evita .db-wal inchar.
         await conn.execute("PRAGMA wal_autocheckpoint=500;")
+        # synchronous=NORMAL: safe em WAL (fsync só no checkpoint),
+        # elimina fsync por commit = 2-3× mais rápido em write bursts.
+        await conn.execute("PRAGMA synchronous=NORMAL;")
+        # Keep-temp-in-memory e cache de 16MB em RAM (era 2MB default).
+        await conn.execute("PRAGMA temp_store=MEMORY;")
+        await conn.execute("PRAGMA cache_size=-16000;")
         yield conn

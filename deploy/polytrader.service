@@ -29,6 +29,16 @@ ReadWritePaths=/opt/polytrader
 MemoryMax=2G
 CPUQuota=80%
 
+# CPU affinity — pin em cores 1-N (core 0 livre pra kernel/systemd/IRQ).
+# Evita cache thrashing em hot path do tracker/executor. Se VPS tem <2
+# cores, systemd ignora silenciosamente.
+CPUAffinity=1 2
+
+# Nice/IOSched: prioridade elevada pra I/O de rede.
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+
 # Watchdog: systemd reinicia se bot travar (heartbeat = 60s, watchdog = 120s)
 WatchdogSec=120
 

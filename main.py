@@ -24,7 +24,7 @@ from src.api.http import close_http_client, prewarm_connections
 from src.api.startup_checks import check_geoblock, latency_baseline
 from src.api.websocket_client import RTDSClient
 from src.core.config import get_settings
-from src.core.database import DEFAULT_DB_PATH, init_database
+from src.core.database import DEFAULT_DB_PATH, init_database, open_shared_connection
 from src.core.logger import configure_logging, get_logger
 from src.core.models import CopyTrade, TradeSignal
 from src.core.state import InMemoryState
@@ -128,7 +128,8 @@ async def amain() -> None:
     await init_database()
 
     # --- shared SQLite connection (Phase 0 — preserva ganho iter 6) ------
-    shared_conn: aiosqlite.Connection = await aiosqlite.connect(DEFAULT_DB_PATH)
+    # open_shared_connection aplica synchronous=NORMAL + cache 16MB + WAL tuning.
+    shared_conn: aiosqlite.Connection = await open_shared_connection(DEFAULT_DB_PATH)
     log.info("shared_conn_opened")
 
     # --- notifier (cedo pra poder alertar em falhas de startup) ----------

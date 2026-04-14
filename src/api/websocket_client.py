@@ -85,16 +85,33 @@ class RTDSClient:
                     )
                     self._watchdog.start()
                     backoff = 1.0
+                    # Pre-computa bytes dos endereços rastreados (case-insensitive).
+                    # Atualiza a cada iteração externa — Set é mutado in-place pelo scanner.
+                    tracked_bytes = {addr.lower().encode() for addr in self._tracked}
                     async for raw in ws:
                         if self._stop.is_set():
                             break
+                        # PREFILTRO BYTE-LEVEL (Regra 4 otimizada).
+                        # Antes de gastar ~30μs em orjson.loads, procura o
+                        # endereço direto no buffer bytes. 95%+ dos pacotes
+                        # RTDS são de makers não-rastreados — dropam aqui em
+                        # ~1μs. Substring match é fuzzy mas seguro: falsos
+                        # positivos re-checam via set lookup após parse.
+                        raw_bytes = raw if isinstance(raw, bytes) else raw.encode()
+                        raw_lower = raw_bytes.lower()
+                        if not any(a in raw_lower for a in tracked_bytes):
+                            # Resync o cache caso scanner tenha adicionado novos
+                            # addresses (1x a cada N mensagens é barato).
+                            if len(tracked_bytes) != len(self._tracked):
+                                tracked_bytes = {
+                                    a.lower().encode() for a in self._tracked
+                                }
+                            continue
                         try:
-                            msg = orjson.loads(raw)
+                            msg = orjson.loads(raw_bytes)
                         except orjson.JSONDecodeError:
                             continue
-                        # Regra 4 — filtro Set() em nanosegundos antes de propagar.
-                        # Defensivo: Polymarket ocasionalmente embrulha em
-                        # payload:/data:. Tenta os 4 paths antes de dropar.
+                        # Confirma via Set após parse (evita false positive do byte match).
                         maker = (
                             msg.get("maker")
                             or msg.get("makerAddress")
@@ -103,7 +120,6 @@ class RTDSClient:
                         )
                         if maker not in self._tracked:
                             continue
-                        # Se veio embrulhado, desembrulha para o consumer.
                         inner = msg.get("payload") or msg.get("data")
                         effective = inner if isinstance(inner, dict) and "maker" in inner else msg
                         if self._on_trade:
