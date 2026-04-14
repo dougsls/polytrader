@@ -45,25 +45,26 @@ for _addr, _name in TARGET_WHALES:
 
 
 def static_whale_profiles() -> list[WalletProfile]:
-    """Gera WalletProfiles sintéticos — todos com score maximum (1.0).
+    """Skeleton de WalletProfiles — enriched depois por enrich_profiles().
 
-    Os gates do scorer (min_profit, win_rate, trades, etc) são bypassados
-    por valores artificialmente altos. O filtro de wash-trading (V/PnL
-    ratio = 0.2) também passa. Em essência, TARGET_WHALES são
-    "pre-approved" e não precisam de qualificação dinâmica.
+    Valores iniciais são placeholders que passam os gates do scorer.
+    O Scanner substitui por dados REAIS (pnl, win_rate, volume, trades,
+    distinct_markets, last_trade_at) vindos de /value + /traded +
+    /closed-positions da Polymarket Data API. Se enrich falhar, o
+    whale permanece com estes defaults — melhor duplicado que vazio.
     """
     now = datetime.now(timezone.utc)
     return [
         WalletProfile(
             address=addr,
             name=name,
-            pnl_usd=100_000.0,
-            volume_usd=500_000.0,  # V/PnL ratio = 0.2, passa wash filter
-            win_rate=0.75,
-            total_trades=200,
-            distinct_markets=25,
+            pnl_usd=1_000.0,
+            volume_usd=5_000.0,
+            win_rate=0.60,
+            total_trades=20,
+            distinct_markets=5,
             short_term_trade_ratio=0.80,
-            last_trade_at=now - timedelta(minutes=30),
+            last_trade_at=now - timedelta(hours=1),
         )
         for addr, name in TARGET_WHALES
     ]

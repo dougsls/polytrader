@@ -2,302 +2,554 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolyTrader Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0">
+<meta name="theme-color" content="#0b1020">
+<title>PolyTrader</title>
 <style>
   :root {
-    --bg: #0b1020; --panel: #121a33; --panel2: #1a2344;
-    --border: #2a3558; --text: #e7ecf6; --muted: #8a96b4;
+    --bg: #0b1020; --panel: #121a33; --panel2: #1a2344; --panel3: #0f1730;
+    --border: #2a3558; --border-soft: #1f2a4a;
+    --text: #e7ecf6; --muted: #8a96b4; --dim: #5a6486;
     --green: #26d07c; --red: #ff5c7c; --yellow: #ffcb47; --blue: #4ea3ff;
-    --font: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
   body {
-    margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
-    background: var(--bg); color: var(--text); min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg); color: var(--text);
+    min-height: 100vh; -webkit-font-smoothing: antialiased; font-size: 14px;
   }
   header {
     background: linear-gradient(180deg, #0f1831 0%, #0b1020 100%);
     border-bottom: 1px solid var(--border);
-    padding: 14px 24px; display: flex; justify-content: space-between; align-items: center;
+    padding: 12px 16px; position: sticky; top: 0; z-index: 10;
+    backdrop-filter: blur(6px);
   }
-  h1 { margin: 0; font-size: 18px; letter-spacing: 0.5px; }
-  h1 .live { color: var(--green); }
-  .badges { display: flex; gap: 8px; }
+  .header-row {
+    display: flex; justify-content: space-between; align-items: center;
+    gap: 8px; flex-wrap: wrap;
+  }
+  .logo { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; }
+  .logo-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--green); box-shadow: 0 0 8px var(--green);
+    animation: blink 1.6s ease-in-out infinite;
+  }
+  .logo-dot.halted { background: var(--red); box-shadow: 0 0 8px var(--red); }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .badges { display: flex; gap: 6px; flex-wrap: wrap; }
   .badge {
-    font-family: var(--font); font-size: 12px; padding: 4px 10px;
-    border: 1px solid var(--border); border-radius: 999px; background: var(--panel);
+    font-family: var(--font-mono); font-size: 11px;
+    padding: 3px 9px; border: 1px solid var(--border);
+    border-radius: 999px; background: var(--panel);
+    white-space: nowrap;
   }
   .badge.mode-paper { color: var(--yellow); border-color: #6a5312; }
   .badge.mode-live { color: var(--red); border-color: #6a1220; }
-  .badge.mode-dry-run { color: var(--muted); }
-  .badge.halted { background: #4a0f1f; color: var(--red); border-color: var(--red); }
-  .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
-  .grid { display: grid; gap: 16px; }
-  .grid.cards { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
-  .grid.cols-2 { grid-template-columns: 1fr 1fr; }
-  @media (max-width: 900px) { .grid.cols-2 { grid-template-columns: 1fr; } }
-  .card {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    padding: 14px 16px;
+  .badge.halted {
+    background: #4a0f1f; color: var(--red); border-color: var(--red);
+    animation: blink 1s ease-in-out infinite;
   }
-  .card h3 {
-    margin: 0 0 6px; font-size: 11px; text-transform: uppercase;
-    letter-spacing: 1px; color: var(--muted); font-weight: 600;
+  main { max-width: 1280px; margin: 0 auto; padding: 16px 12px 40px; }
+  @media (min-width: 640px) { main { padding: 20px 16px 48px; } }
+  .hero {
+    background: linear-gradient(135deg, #1a2344 0%, #121a33 100%);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px 16px; margin-bottom: 16px;
   }
-  .card .value {
-    font-family: var(--font); font-size: 22px; font-weight: 600;
+  .hero-title {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1.2px;
+    color: var(--muted); margin: 0 0 6px;
   }
-  .card .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .hero-state { font-size: 18px; font-weight: 600; line-height: 1.4; margin: 0; }
+  .hero-state .highlight { font-family: var(--font-mono); color: var(--blue); }
+  .hero-state .negative { color: var(--red); }
+  .hero-explainer {
+    margin-top: 10px; font-size: 13px; color: var(--muted); line-height: 1.5;
+  }
+  .hero-explainer code {
+    font-family: var(--font-mono); background: var(--panel3);
+    padding: 1px 6px; border-radius: 3px; color: var(--blue);
+  }
+  .kpi-grid {
+    display: grid; gap: 10px; grid-template-columns: repeat(2, 1fr);
+    margin-bottom: 16px;
+  }
+  @media (min-width: 720px) { .kpi-grid { grid-template-columns: repeat(3, 1fr); } }
+  @media (min-width: 1080px) { .kpi-grid { grid-template-columns: repeat(6, 1fr); } }
+  .kpi {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px;
+  }
+  .kpi-label {
+    display: flex; align-items: center; gap: 4px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px;
+    color: var(--muted); font-weight: 600; margin-bottom: 4px;
+  }
+  .kpi-help {
+    display: inline-block; width: 14px; height: 14px;
+    border-radius: 50%; border: 1px solid var(--dim); color: var(--dim);
+    font-size: 10px; text-align: center; line-height: 12px; cursor: help;
+    flex-shrink: 0; font-weight: 700;
+  }
+  .kpi-value {
+    font-family: var(--font-mono); font-size: 18px;
+    font-weight: 600; line-height: 1.2;
+  }
+  .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 2px; font-family: var(--font-mono); }
   .positive { color: var(--green); }
   .negative { color: var(--red); }
   .neutral { color: var(--muted); }
+  .tabs {
+    display: flex; gap: 4px; overflow-x: auto;
+    margin-bottom: 12px; padding-bottom: 2px;
+    border-bottom: 1px solid var(--border);
+    scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    padding: 10px 14px; font-size: 13px; white-space: nowrap;
+    background: transparent; border: none; color: var(--muted);
+    cursor: pointer; border-bottom: 2px solid transparent;
+    font-family: inherit; font-weight: 500;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .tab:hover { color: var(--text); }
+  .tab.active { color: var(--blue); border-bottom-color: var(--blue); }
+  .tab .count {
+    font-family: var(--font-mono); font-size: 10px;
+    background: var(--panel); padding: 1px 6px; border-radius: 999px;
+    color: var(--muted);
+  }
+  .tab.active .count { background: rgba(78, 163, 255, 0.15); color: var(--blue); }
   .panel {
-    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-    overflow: hidden; margin-top: 16px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; overflow: hidden; margin-bottom: 14px;
   }
-  .panel h2 {
-    margin: 0; padding: 12px 16px; font-size: 13px; text-transform: uppercase;
-    letter-spacing: 1px; border-bottom: 1px solid var(--border); color: var(--muted);
-    display: flex; justify-content: space-between; align-items: center;
+  .panel-head { padding: 12px 14px; border-bottom: 1px solid var(--border-soft); background: var(--panel3); }
+  .panel-title { margin: 0; font-size: 14px; font-weight: 600; }
+  .panel-desc { margin: 4px 0 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .panel-desc b { color: var(--text); }
+  .panel-body { padding: 0; }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .data-table th, .data-table td {
+    padding: 10px 14px; text-align: left;
+    border-bottom: 1px solid var(--border-soft);
   }
-  .panel .count { color: var(--blue); font-family: var(--font); font-size: 11px; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border); }
-  th {
-    background: var(--panel2); color: var(--muted); font-weight: 600;
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px;
+  .data-table th {
+    background: var(--panel2); color: var(--muted);
+    font-weight: 600; font-size: 10px;
+    text-transform: uppercase; letter-spacing: 0.8px;
   }
-  tbody tr:last-child td { border-bottom: none; }
-  tbody tr:hover { background: rgba(78, 163, 255, 0.05); }
-  .mono { font-family: var(--font); font-size: 12px; }
-  .truncate { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .data-table tbody tr:last-child td { border-bottom: none; }
+  .data-table tbody tr:hover { background: rgba(78, 163, 255, 0.04); }
+  @media (max-width: 720px) {
+    .data-table, .data-table tbody, .data-table tr, .data-table td { display: block; width: 100%; }
+    .data-table thead { display: none; }
+    .data-table tr { border-bottom: 1px solid var(--border); padding: 12px 14px; }
+    .data-table tr:last-child { border-bottom: none; }
+    .data-table td {
+      padding: 4px 0; border: none;
+      display: flex; justify-content: space-between; align-items: center;
+      font-size: 13px; gap: 10px;
+    }
+    .data-table td::before {
+      content: attr(data-label);
+      font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.8px; color: var(--muted); font-weight: 600;
+    }
+  }
+  .mono { font-family: var(--font-mono); font-size: 12px; }
+  .truncate { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .addr { font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
   .pill {
     display: inline-block; padding: 2px 8px; border-radius: 4px;
-    font-size: 11px; font-family: var(--font); font-weight: 600;
+    font-size: 10px; font-family: var(--font-mono); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.3px;
   }
   .pill.buy { background: rgba(38, 208, 124, 0.15); color: var(--green); }
   .pill.sell { background: rgba(255, 92, 124, 0.15); color: var(--red); }
   .pill.pending { background: rgba(255, 203, 71, 0.15); color: var(--yellow); }
-  .pill.executed { background: rgba(38, 208, 124, 0.15); color: var(--green); }
-  .pill.skipped { background: rgba(138, 150, 180, 0.15); color: var(--muted); }
+  .pill.executed, .pill.active, .pill.filled { background: rgba(38, 208, 124, 0.15); color: var(--green); }
+  .pill.skipped, .pill.inactive, .pill.cancelled { background: rgba(138, 150, 180, 0.15); color: var(--muted); }
   .pill.failed { background: rgba(255, 92, 124, 0.15); color: var(--red); }
-  .pill.filled { background: rgba(38, 208, 124, 0.15); color: var(--green); }
-  .empty { padding: 24px 16px; text-align: center; color: var(--muted); font-size: 13px; }
-  .toolbar { display: flex; gap: 8px; align-items: center; }
-  button {
-    font-family: var(--font); font-size: 12px; padding: 6px 14px;
-    background: var(--panel2); color: var(--text);
-    border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+  .empty { padding: 32px 20px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.6; }
+  .empty-icon { font-size: 32px; display: block; margin-bottom: 8px; opacity: 0.5; }
+  .empty-hint {
+    font-size: 12px; color: var(--dim); margin-top: 6px;
+    max-width: 460px; margin-left: auto; margin-right: auto;
   }
-  button:hover { background: #25305a; }
-  button.danger { border-color: var(--red); color: var(--red); }
-  button.success { border-color: var(--green); color: var(--green); }
-  .footer { text-align: center; margin: 24px 0 12px; font-size: 11px; color: var(--muted); }
-  .blink { animation: blink 1.2s ease-in-out infinite; }
-  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+  .toolbar {
+    padding: 12px 14px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  }
+  button.btn {
+    font-family: inherit; font-size: 13px; font-weight: 500;
+    padding: 8px 14px; background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+    transition: all 0.15s;
+  }
+  button.btn:hover { background: #2a3670; }
+  button.btn.danger { border-color: var(--red); color: var(--red); }
+  button.btn.success { border-color: var(--green); color: var(--green); }
+  .activity-bar {
+    display: flex; height: 6px; border-radius: 3px;
+    overflow: hidden; background: var(--panel3); margin-top: 6px;
+  }
+  .activity-bar span { display: block; height: 100%; }
+  .activity-bar .exec { background: var(--green); }
+  .activity-bar .skip { background: var(--yellow); }
+  .activity-bar .fail { background: var(--red); }
+  .footer { text-align: center; margin: 32px 0 16px; font-size: 11px; color: var(--dim); }
+  .footer a { color: var(--blue); text-decoration: none; }
+  .section-hide { display: none; }
 </style>
 </head>
 <body>
+
 <header>
-  <h1>🔹 PolyTrader <span class="live blink">●</span> LIVE</h1>
-  <div class="badges">
-    <span class="badge" id="badge-mode">mode: —</span>
-    <span class="badge" id="badge-location">vps: —</span>
-    <span class="badge" id="badge-uptime">up: —</span>
-    <span class="badge" id="badge-halt" style="display:none;">HALTED</span>
+  <div class="header-row">
+    <div class="logo">
+      <span class="logo-dot" id="logo-dot"></span>
+      <span>PolyTrader</span>
+    </div>
+    <div class="badges">
+      <span class="badge" id="badge-mode">mode: —</span>
+      <span class="badge" id="badge-location">vps: —</span>
+      <span class="badge" id="badge-uptime">up: —</span>
+      <span class="badge halted" id="badge-halt" style="display:none;">⚠ HALTED</span>
+    </div>
   </div>
 </header>
 
-<div class="container">
-  <div class="grid cards">
-    <div class="card"><h3>USDC Balance</h3><div class="value mono" id="bal">—</div><div class="sub" id="bal-sub"></div></div>
-    <div class="card"><h3>PnL Realized 24h</h3><div class="value mono" id="pnl24">—</div><div class="sub">últimas 24h (closed)</div></div>
-    <div class="card"><h3>Unrealized PnL</h3><div class="value mono" id="pnlu">—</div><div class="sub">posições abertas</div></div>
-    <div class="card"><h3>Open Positions</h3><div class="value mono" id="open-pos">—</div><div class="sub" id="open-sub"></div></div>
-    <div class="card"><h3>Active Whales</h3><div class="value mono" id="whales">—</div><div class="sub" id="whales-sub"></div></div>
-    <div class="card"><h3>Signals 24h</h3><div class="value mono" id="sig-total">—</div><div class="sub" id="sig-sub"></div></div>
+<main>
+  <div class="hero">
+    <p class="hero-title">Status em tempo real</p>
+    <p class="hero-state" id="hero-state">Carregando…</p>
+    <div class="hero-explainer" id="hero-explainer"></div>
   </div>
 
-  <div class="panel">
-    <h2>
-      <span>🐋 Tracked Whales</span>
-      <span class="count" id="wallets-count">—</span>
-    </h2>
-    <div id="wallets-table"></div>
+  <div class="kpi-grid">
+    <div class="kpi">
+      <div class="kpi-label">Saldo USDC
+        <span class="kpi-help" title="Saldo on-chain de USDC.e na wallet Polygon. Em paper mode este valor é fixo (stub) — em live é o saldo real consultado via RPC a cada 15s.">?</span>
+      </div>
+      <div class="kpi-value mono" id="kpi-bal">—</div>
+      <div class="kpi-sub" id="kpi-bal-sub"></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">PnL Realizado 24h
+        <span class="kpi-help" title="Lucro ou prejuízo efetivado nas últimas 24h — soma do realized_pnl das posições fechadas no período.">?</span>
+      </div>
+      <div class="kpi-value mono" id="kpi-pnl24">—</div>
+      <div class="kpi-sub">closed positions</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">PnL Não Realizado
+        <span class="kpi-help" title="Valor latente nas posições abertas. Só vira realizado quando a posição é vendida ou o mercado resolve.">?</span>
+      </div>
+      <div class="kpi-value mono" id="kpi-pnlu">—</div>
+      <div class="kpi-sub">posições abertas</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Posições Abertas
+        <span class="kpi-help" title="Número de tokens em que o bot tem posição aberta agora. Cada posição ocupa uma slot do max_positions (default 15).">?</span>
+      </div>
+      <div class="kpi-value mono" id="kpi-open">—</div>
+      <div class="kpi-sub" id="kpi-open-sub"></div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Whales Ativas
+        <span class="kpi-help" title="Carteiras rastreadas via WebSocket RTDS. Whitelist estática de 20 hedge funds/snipers elite da Polymarket. Só trades destas wallets geram sinais.">?</span>
+      </div>
+      <div class="kpi-value mono" id="kpi-whales">—</div>
+      <div class="kpi-sub">whitelist estática</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-label">Sinais 24h
+        <span class="kpi-help" title="Trades detectados nas últimas 24h. executed = passou nos filtros e virou ordem. skipped = bloqueado por gate (slippage, spread, duração, score). failed = erro de rede/API.">?</span>
+      </div>
+      <div class="kpi-value mono" id="kpi-sig">—</div>
+      <div class="kpi-sub mono" id="kpi-sig-sub">—</div>
+      <div class="activity-bar" id="kpi-sig-bar" style="display:none;">
+        <span class="exec"></span><span class="skip"></span><span class="fail"></span>
+      </div>
+    </div>
   </div>
 
-  <div class="grid cols-2">
+  <div class="tabs" id="tabs">
+    <button class="tab active" data-tab="activity">📡 Atividade <span class="count" id="tab-act-count">0</span></button>
+    <button class="tab" data-tab="whales">🐋 Whales <span class="count" id="tab-whales-count">20</span></button>
+    <button class="tab" data-tab="trades">💱 Trades <span class="count" id="tab-trades-count">0</span></button>
+    <button class="tab" data-tab="positions">📊 Posições <span class="count" id="tab-pos-count">0</span></button>
+    <button class="tab" data-tab="control">⚙️ Controle</button>
+  </div>
+
+  <section id="section-activity">
     <div class="panel">
-      <h2>
-        <span>📡 Recent Signals</span>
-        <span class="count" id="signals-count">—</span>
-      </h2>
-      <div id="signals-table"></div>
+      <div class="panel-head">
+        <h2 class="panel-title">📡 Sinais RTDS — o que as whales fizeram</h2>
+        <p class="panel-desc">
+          Cada linha é um trade de uma whale do pool. Bot decide <b>copiar</b>
+          (<span class="pill executed">EXECUTED</span>) ou <b>ignorar</b>
+          (<span class="pill skipped">SKIPPED</span>) com base em 10 regras:
+          slippage &lt;3%, spread &lt;2%, duração &lt;48h, score ≥0.6, etc.
+          O motivo do skip aparece em cinza logo abaixo do status.
+        </p>
+      </div>
+      <div class="panel-body" id="signals-body"></div>
     </div>
+  </section>
 
+  <section id="section-whales" class="section-hide">
     <div class="panel">
-      <h2>
-        <span>💱 Copy Trades</span>
-        <span class="count" id="trades-count">—</span>
-      </h2>
-      <div id="trades-table"></div>
+      <div class="panel-head">
+        <h2 class="panel-title">🐋 Whales monitoradas</h2>
+        <p class="panel-desc">
+          20 carteiras elite (hedge funds + snipers). Métricas puxadas
+          <b>on-chain via Polymarket Data API</b> (<code>/value</code>,
+          <code>/traded</code>, <code>/closed-positions</code>).
+          <b>PnL Total</b> = soma do realized_pnl de todos closed positions.
+          <b>Win Rate</b> = wins / total_closed. Atualizado no scan de 60min.
+        </p>
+      </div>
+      <div class="panel-body" id="whales-body"></div>
     </div>
-  </div>
+  </section>
 
-  <div class="panel">
-    <h2>
-      <span>📊 Bot Positions (Open)</span>
-      <span class="count" id="positions-count">—</span>
-    </h2>
-    <div id="positions-table"></div>
-  </div>
-
-  <div class="panel">
-    <h2>
-      <span>⚙️ Governance</span>
-      <span class="count" id="halt-status">—</span>
-    </h2>
-    <div style="padding: 14px 16px;" class="toolbar">
-      <button class="danger" onclick="callHalt()">🛑 HALT trading</button>
-      <button class="success" onclick="callResume()">▶ RESUME</button>
-      <span class="sub mono" id="halt-reason" style="color:var(--muted);"></span>
+  <section id="section-trades" class="section-hide">
+    <div class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">💱 Copy trades executadas</h2>
+        <p class="panel-desc">
+          Ordens que o bot efetivamente tentou postar no CLOB. Em
+          <b>paper mode</b> não há envio real — o trade é registrado como se
+          tivesse preenchido ao preço limite. <b>Slippage</b> = diferença entre
+          preço planejado e executado.
+        </p>
+      </div>
+      <div class="panel-body" id="trades-body"></div>
     </div>
-  </div>
+  </section>
 
-  <div class="footer">auto-refresh 5s · polytrader dashboard</div>
-</div>
+  <section id="section-positions" class="section-hide">
+    <div class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">📊 Posições abertas do bot</h2>
+        <p class="panel-desc">
+          Inventário ativo — tokens que o bot está segurando. Quando a whale
+          origem vender, o bot replica <b>proporcionalmente</b>
+          (Regra 2 — Exit Syncing). Entry price = média ponderada das compras.
+        </p>
+      </div>
+      <div class="panel-body" id="positions-body"></div>
+    </div>
+  </section>
+
+  <section id="section-control" class="section-hide">
+    <div class="panel">
+      <div class="panel-head">
+        <h2 class="panel-title">⚙️ Governança</h2>
+        <p class="panel-desc">
+          <b>HALT</b> congela imediatamente qualquer nova ordem. Posições abertas
+          permanecem. Útil pra investigar comportamento anômalo. <b>RESUME</b>
+          reativa. O bot também auto-halta após 4 falhas consecutivas de
+          post_order (circuit breaker).
+        </p>
+      </div>
+      <div class="panel-body">
+        <div class="toolbar">
+          <button class="btn danger" onclick="callHalt()">🛑 Halt Trading</button>
+          <button class="btn success" onclick="callResume()">▶ Resume</button>
+          <span class="kpi-sub mono" id="halt-reason" style="margin-left:8px;"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="footer">
+    auto-refresh 5s ·
+    <a href="/health" target="_blank">/health</a> ·
+    <a href="/metrics" target="_blank">/metrics</a> ·
+    <span id="last-refresh">—</span>
+  </div>
+</main>
 
 <script>
 const fmt = {
-  usd: v => (v == null ? '—' : `$${Number(v).toFixed(2)}`),
-  pct: v => (v == null ? '—' : `${(Number(v) * 100).toFixed(1)}%`),
-  int: v => (v == null ? '—' : Number(v).toLocaleString()),
-  addr: a => a ? a.slice(0, 10) + '…' + a.slice(-4) : '—',
-  time: s => s ? new Date(s).toLocaleTimeString('pt-BR') : '—',
-  pnlClass: v => v == null ? 'neutral' : (v > 0 ? 'positive' : (v < 0 ? 'negative' : 'neutral')),
-  pnlPrefix: v => v == null ? '' : (v > 0 ? '+' : ''),
+  usd: (v, d=2) => v == null ? '—' : `$${Number(v).toLocaleString('en-US', {minimumFractionDigits: d, maximumFractionDigits: d})}`,
+  pct: v => v == null ? '—' : `${(Number(v) * 100).toFixed(1)}%`,
+  num: v => v == null ? '—' : Number(v).toLocaleString('en-US'),
+  addr: a => a ? a.slice(0, 8) + '…' + a.slice(-4) : '—',
+  time: s => {
+    if (!s) return '—';
+    const d = new Date(s);
+    if (isNaN(d)) return s;
+    const diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 60) return `${Math.floor(diff)}s atrás`;
+    if (diff < 3600) return `${Math.floor(diff/60)}m atrás`;
+    if (diff < 86400) return `${Math.floor(diff/3600)}h atrás`;
+    if (diff < 2592000) return `${Math.floor(diff/86400)}d atrás`;
+    return d.toLocaleDateString('pt-BR');
+  },
   uptime: s => {
     if (!s) return '—';
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    if (h >= 24) { const d = Math.floor(h / 24); return `${d}d${h % 24}h`; }
     return h > 0 ? `${h}h${String(m).padStart(2,'0')}` : `${m}m`;
   },
+  pnlClass: v => v == null ? 'neutral' : (v > 0.01 ? 'positive' : (v < -0.01 ? 'negative' : 'neutral')),
+  pnlPrefix: v => v == null ? '' : (v > 0.01 ? '+' : ''),
 };
 
-async function j(url, opts) {
-  const r = await fetch(url, opts);
+async function j(url) {
+  const r = await fetch(url);
   if (!r.ok) throw new Error(r.status + ' ' + url);
   return r.json();
 }
 
-async function refresh() {
-  try {
-    const [ov, wallets, signals, positions, trades] = await Promise.all([
-      j('/api/overview'),
-      j('/api/wallets'),
-      j('/api/signals?limit=30'),
-      j('/api/positions'),
-      j('/api/trades?limit=30'),
-    ]);
+document.getElementById('tabs').addEventListener('click', e => {
+  const t = e.target.closest('.tab');
+  if (!t) return;
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  const target = t.dataset.tab;
+  document.querySelectorAll('section').forEach(s => {
+    s.className = s.id === 'section-' + target ? '' : 'section-hide';
+  });
+});
 
-    // Header badges
-    const modeBadge = document.getElementById('badge-mode');
-    modeBadge.textContent = `mode: ${ov.mode}`;
-    modeBadge.className = `badge mode-${ov.mode}`;
-    document.getElementById('badge-location').textContent = `vps: ${ov.vps_location}`;
-    document.getElementById('badge-uptime').textContent = `up: ${fmt.uptime(ov.uptime_seconds)}`;
-    const haltBadge = document.getElementById('badge-halt');
-    haltBadge.style.display = ov.halted ? '' : 'none';
-    document.getElementById('halt-status').textContent = ov.halted ? 'HALTED' : 'running';
-    document.getElementById('halt-reason').textContent = ov.halt_reason ? `reason: ${ov.halt_reason}` : '';
+function renderHero(ov) {
+  const el = document.getElementById('hero-state');
+  const explain = document.getElementById('hero-explainer');
+  const dot = document.getElementById('logo-dot');
 
-    // Cards
-    document.getElementById('bal').textContent = fmt.usd(ov.balance_usdc);
-    document.getElementById('bal-sub').textContent = ov.balance_fresh ? 'fresh' : '⚠ stale';
-    document.getElementById('bal-sub').className = 'sub ' + (ov.balance_fresh ? 'positive' : 'negative');
-
-    const r24 = ov.pnl.realized_24h;
-    const el24 = document.getElementById('pnl24');
-    el24.textContent = fmt.pnlPrefix(r24) + fmt.usd(r24);
-    el24.className = 'value mono ' + fmt.pnlClass(r24);
-
-    const pu = ov.pnl.unrealized;
-    const elU = document.getElementById('pnlu');
-    elU.textContent = fmt.pnlPrefix(pu) + fmt.usd(pu);
-    elU.className = 'value mono ' + fmt.pnlClass(pu);
-
-    document.getElementById('open-pos').textContent = ov.open_positions;
-    document.getElementById('open-sub').textContent = `${ov.whale_inventory_entries} whale pos cached`;
-
-    document.getElementById('whales').textContent = ov.active_whales;
-    document.getElementById('whales-sub').textContent = 'static whitelist';
-
-    const sc = ov.signals_24h || {};
-    const sigTotal = (sc.executed||0) + (sc.skipped||0) + (sc.pending||0) + (sc.failed||0);
-    document.getElementById('sig-total').textContent = sigTotal;
-    document.getElementById('sig-sub').textContent =
-      `exec:${sc.executed||0} skip:${sc.skipped||0} fail:${sc.failed||0}`;
-
-    // Wallets table
-    renderWallets(wallets);
-    document.getElementById('wallets-count').textContent = `${wallets.filter(w=>w.is_active).length} active`;
-
-    // Signals table
-    renderSignals(signals);
-    document.getElementById('signals-count').textContent = `${signals.length} recent`;
-
-    // Trades table
-    renderTrades(trades);
-    document.getElementById('trades-count').textContent = `${trades.length} recent`;
-
-    // Positions
-    renderPositions(positions);
-    document.getElementById('positions-count').textContent = `${positions.open_count} open`;
-
-  } catch (e) {
-    console.error('refresh failed', e);
+  if (ov.halted) {
+    dot.className = 'logo-dot halted';
+    el.innerHTML = `🛑 <span class="negative">HALT GLOBAL</span> — motivo: <span class="highlight">${ov.halt_reason || 'manual'}</span>`;
+    explain.innerHTML = `Nenhuma nova ordem será enviada até um <code>RESUME</code> manual. Posições abertas continuam sendo monitoradas.`;
+    return;
   }
+  dot.className = 'logo-dot';
+
+  const whales = ov.active_whales, opens = ov.open_positions;
+  const sc = ov.signals_24h || {};
+  const execs = sc.executed || 0;
+  const skips = sc.skipped || 0;
+
+  if (ov.mode === 'paper') {
+    el.innerHTML = `✅ Bot ativo em <span class="highlight">PAPER MODE</span> — monitorando <span class="highlight">${whales}</span> whales via WebSocket`;
+    if (execs === 0 && skips === 0 && opens === 0) {
+      explain.innerHTML = `
+        Aguardando qualquer uma das ${whales} whales rastreadas postar uma ordem
+        em mercado com resolução &lt; 48h. Assim que detectar, os filtros
+        (slippage, spread, duração, score) rodam e a operação aparece em
+        <b>Atividade</b>. Em paper, nenhuma ordem real é enviada — apenas
+        simulada no banco local pra você avaliar a estratégia.
+      `;
+    } else if (opens > 0) {
+      explain.innerHTML = `
+        <b>${opens}</b> ${opens === 1 ? 'posição aberta' : 'posições abertas'} ·
+        <b>${execs}</b> ordem${execs !== 1 ? 's' : ''} executada${execs !== 1 ? 's' : ''} 24h ·
+        <b>${skips}</b> skip${skips !== 1 ? 's' : ''}.
+        Abra a aba <b>Posições</b> pra ver inventário e PnL latente.
+      `;
+    } else {
+      explain.innerHTML = `
+        <b>${execs}</b> ordens simuladas · <b>${skips}</b> skippadas nas últimas 24h.
+        Sem posições abertas (todas fechadas / SELL completo).
+      `;
+    }
+    return;
+  }
+  if (ov.mode === 'live') {
+    el.innerHTML = `🔴 Bot ativo em <span class="highlight negative">LIVE MODE</span> — capital real sendo arriscado`;
+    explain.innerHTML = `Ordens reais enviadas ao CLOB. Saldo USDC: ${fmt.usd(ov.balance_usdc)}. Monitorando ${whales} whales.`;
+    return;
+  }
+  el.textContent = `Mode: ${ov.mode}`;
+  explain.textContent = 'dry-run: sinais detectados não geram ordens nem gravam em DB.';
 }
 
-function renderWallets(rows) {
-  const el = document.getElementById('wallets-table');
-  if (!rows.length) { el.innerHTML = '<div class="empty">Nenhuma carteira rastreada.</div>'; return; }
-  let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Score</th><th>PnL USD</th><th>Win Rate</th><th>Trades</th><th>Status</th></tr></thead><tbody>';
-  for (const w of rows) {
-    html += `<tr>
-      <td>${w.name || '<span class="neutral">—</span>'}</td>
-      <td class="mono">${fmt.addr(w.address)}</td>
-      <td class="mono">${(w.score || 0).toFixed(2)}</td>
-      <td class="mono ${fmt.pnlClass(w.pnl_usd)}">${fmt.usd(w.pnl_usd)}</td>
-      <td class="mono">${fmt.pct(w.win_rate)}</td>
-      <td class="mono">${fmt.int(w.total_trades)}</td>
-      <td><span class="pill ${w.is_active?'executed':'skipped'}">${w.is_active?'active':'inactive'}</span></td>
-    </tr>`;
+function renderKPIs(ov) {
+  const bm = document.getElementById('badge-mode');
+  bm.textContent = `mode: ${ov.mode}`;
+  bm.className = `badge mode-${ov.mode}`;
+  document.getElementById('badge-location').textContent = `vps: ${ov.vps_location}`;
+  document.getElementById('badge-uptime').textContent = `up: ${fmt.uptime(ov.uptime_seconds)}`;
+  document.getElementById('badge-halt').style.display = ov.halted ? '' : 'none';
+
+  document.getElementById('kpi-bal').textContent = fmt.usd(ov.balance_usdc);
+  const bs = document.getElementById('kpi-bal-sub');
+  bs.textContent = ov.balance_fresh ? '✓ fresh' : '⚠ stale';
+  bs.className = 'kpi-sub ' + (ov.balance_fresh ? 'positive' : 'negative');
+
+  const r = ov.pnl.realized_24h;
+  const elR = document.getElementById('kpi-pnl24');
+  elR.textContent = fmt.pnlPrefix(r) + fmt.usd(r);
+  elR.className = 'kpi-value mono ' + fmt.pnlClass(r);
+
+  const pu = ov.pnl.unrealized;
+  const elU = document.getElementById('kpi-pnlu');
+  elU.textContent = fmt.pnlPrefix(pu) + fmt.usd(pu);
+  elU.className = 'kpi-value mono ' + fmt.pnlClass(pu);
+
+  document.getElementById('kpi-open').textContent = ov.open_positions;
+  document.getElementById('kpi-open-sub').textContent = `${ov.whale_inventory_entries} whale pos cached`;
+  document.getElementById('kpi-whales').textContent = ov.active_whales;
+
+  const sc = ov.signals_24h || {};
+  const total = (sc.executed || 0) + (sc.skipped || 0) + (sc.pending || 0) + (sc.failed || 0);
+  document.getElementById('kpi-sig').textContent = total;
+  document.getElementById('kpi-sig-sub').innerHTML = total === 0 ? 'aguardando…'
+    : `<span class="positive">✓${sc.executed||0}</span> · <span class="neutral">↷${sc.skipped||0}</span> · <span class="negative">✕${sc.failed||0}</span>`;
+  const bar = document.getElementById('kpi-sig-bar');
+  if (total > 0) {
+    bar.style.display = 'flex';
+    bar.children[0].style.flex = (sc.executed || 0);
+    bar.children[1].style.flex = (sc.skipped || 0);
+    bar.children[2].style.flex = (sc.failed || 0);
+  } else {
+    bar.style.display = 'none';
   }
-  html += '</tbody></table>';
-  el.innerHTML = html;
+  document.getElementById('tab-act-count').textContent = total;
+  document.getElementById('tab-whales-count').textContent = ov.active_whales;
+  document.getElementById('tab-pos-count').textContent = ov.open_positions;
 }
 
 function renderSignals(rows) {
-  const el = document.getElementById('signals-table');
+  const el = document.getElementById('signals-body');
   if (!rows.length) {
-    el.innerHTML = '<div class="empty">Aguardando sinais do RTDS…<br/><span class="mono" style="color:var(--muted);font-size:11px;">Sinais aparecem quando uma das 20 whales negocia em mercado &lt;48h.</span></div>';
+    el.innerHTML = `
+      <div class="empty">
+        <span class="empty-icon">🎯</span>
+        <div><b>Aguardando sinais das whales</b></div>
+        <div class="empty-hint">
+          Nenhuma das 20 whales operou ainda nesta sessão. Sinais aparecem em
+          tempo real quando qualquer uma delas postar ordem em mercado &lt; 48h.
+          WebSocket RTDS já conectado e filtro Set ativo.
+        </div>
+      </div>`;
     return;
   }
-  let html = '<table><thead><tr><th>Time</th><th>Side</th><th>Market</th><th>Price</th><th>USD</th><th>TTL</th><th>Status</th></tr></thead><tbody>';
+  let html = '<table class="data-table"><thead><tr>' +
+    '<th>Quando</th><th>Whale</th><th>Side</th><th>Mercado</th>' +
+    '<th>Preço</th><th>USD</th><th>TTL</th><th>Status</th></tr></thead><tbody>';
   for (const s of rows) {
     const ttl = s.hours_to_resolution != null ? `${s.hours_to_resolution.toFixed(1)}h` : '—';
-    const title = (s.market_title || '—').slice(0, 50);
+    const title = (s.market_title || '—');
+    const skipHint = s.skip_reason
+      ? `<div class="mono neutral" style="font-size:10px;margin-top:3px;">${s.skip_reason}</div>` : '';
     html += `<tr>
-      <td class="mono">${fmt.time(s.detected_at)}</td>
-      <td><span class="pill ${s.side.toLowerCase()}">${s.side}</span></td>
-      <td class="truncate" title="${(s.market_title||'').replace(/"/g,'&quot;')}">${title}</td>
-      <td class="mono">${s.price ? s.price.toFixed(3) : '—'}</td>
-      <td class="mono">${fmt.usd(s.usd_value)}</td>
-      <td class="mono">${ttl}</td>
-      <td>
-        <span class="pill ${s.status}">${s.status}</span>
-        ${s.skip_reason ? `<div class="mono neutral" style="font-size:10px;margin-top:2px;">${s.skip_reason.slice(0,40)}</div>` : ''}
+      <td data-label="Quando" class="mono">${fmt.time(s.detected_at)}</td>
+      <td data-label="Whale" class="addr">${fmt.addr(s.wallet)}</td>
+      <td data-label="Side"><span class="pill ${s.side.toLowerCase()}">${s.side}</span></td>
+      <td data-label="Mercado" class="truncate" title="${title.replace(/"/g,'&quot;')}">${title.slice(0,60)}</td>
+      <td data-label="Preço" class="mono">${s.price ? s.price.toFixed(3) : '—'}</td>
+      <td data-label="USD" class="mono">${fmt.usd(s.usd_value)}</td>
+      <td data-label="TTL" class="mono">${ttl}</td>
+      <td data-label="Status">
+        <span class="pill ${s.status}">${s.status}</span>${skipHint}
       </td>
     </tr>`;
   }
@@ -305,26 +557,61 @@ function renderSignals(rows) {
   el.innerHTML = html;
 }
 
+function renderWallets(rows) {
+  const el = document.getElementById('whales-body');
+  if (!rows.length) { el.innerHTML = '<div class="empty">Nenhuma whale no pool.</div>'; return; }
+  let html = '<table class="data-table"><thead><tr>' +
+    '<th>Nome</th><th>Address</th><th>Score</th><th>PnL Total</th>' +
+    '<th>Win Rate</th><th>Trades</th><th>Último</th><th>Status</th></tr></thead><tbody>';
+  for (const w of rows) {
+    const last = w.last_trade_at ? fmt.time(w.last_trade_at) : '—';
+    html += `<tr>
+      <td data-label="Nome"><b>${w.name || '—'}</b></td>
+      <td data-label="Address" class="addr" title="${w.address}">${fmt.addr(w.address)}</td>
+      <td data-label="Score" class="mono">${(w.score || 0).toFixed(2)}</td>
+      <td data-label="PnL Total" class="mono ${fmt.pnlClass(w.pnl_usd)}">${fmt.pnlPrefix(w.pnl_usd)}${fmt.usd(w.pnl_usd, 0)}</td>
+      <td data-label="Win Rate" class="mono">${fmt.pct(w.win_rate)}</td>
+      <td data-label="Trades" class="mono">${fmt.num(w.total_trades)}</td>
+      <td data-label="Último" class="mono neutral" style="font-size:11px;">${last}</td>
+      <td data-label="Status"><span class="pill ${w.is_active ? 'active' : 'inactive'}">${w.is_active ? 'ativo' : 'inativo'}</span></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
 function renderTrades(rows) {
-  const el = document.getElementById('trades-table');
+  const el = document.getElementById('trades-body');
+  document.getElementById('tab-trades-count').textContent = rows.length || '0';
   if (!rows.length) {
-    el.innerHTML = '<div class="empty">Nenhum copy trade ainda.</div>';
+    el.innerHTML = `
+      <div class="empty">
+        <span class="empty-icon">💸</span>
+        <div><b>Nenhum copy trade ainda</b></div>
+        <div class="empty-hint">
+          Copy trades aparecem quando um sinal passa por todos os filtros
+          (risk manager + slippage anchor + spread shield + tag exposure)
+          e o bot envia ordem ao CLOB.
+        </div>
+      </div>`;
     return;
   }
-  let html = '<table><thead><tr><th>Time</th><th>Side</th><th>Market</th><th>Size</th><th>Price</th><th>Slip</th><th>Status</th></tr></thead><tbody>';
+  let html = '<table class="data-table"><thead><tr>' +
+    '<th>Quando</th><th>Side</th><th>Mercado</th><th>Size</th>' +
+    '<th>Preço</th><th>Slip</th><th>Status</th></tr></thead><tbody>';
   for (const t of rows) {
     const size = t.executed_size ?? t.intended_size;
     const price = t.executed_price ?? t.intended_price;
     const slip = t.slippage != null ? (t.slippage * 100).toFixed(2) + '%' : '—';
-    const title = (t.market_title || t.condition_id || '—').slice(0, 50);
+    const title = (t.market_title || t.condition_id || '—');
     html += `<tr>
-      <td class="mono">${fmt.time(t.created_at)}</td>
-      <td><span class="pill ${t.side.toLowerCase()}">${t.side}</span></td>
-      <td class="truncate" title="${(t.market_title||'').replace(/"/g,'&quot;')}">${title}</td>
-      <td class="mono">${size ? size.toFixed(2) : '—'}</td>
-      <td class="mono">${price ? price.toFixed(3) : '—'}</td>
-      <td class="mono">${slip}</td>
-      <td><span class="pill ${t.status}">${t.status}</span></td>
+      <td data-label="Quando" class="mono">${fmt.time(t.created_at)}</td>
+      <td data-label="Side"><span class="pill ${t.side.toLowerCase()}">${t.side}</span></td>
+      <td data-label="Mercado" class="truncate" title="${title.replace(/"/g,'&quot;')}">${title.slice(0,60)}</td>
+      <td data-label="Size" class="mono">${size ? size.toFixed(2) : '—'}</td>
+      <td data-label="Preço" class="mono">${price ? price.toFixed(3) : '—'}</td>
+      <td data-label="Slip" class="mono">${slip}</td>
+      <td data-label="Status"><span class="pill ${t.status}">${t.status}</span></td>
     </tr>`;
   }
   html += '</tbody></table>';
@@ -332,23 +619,33 @@ function renderTrades(rows) {
 }
 
 function renderPositions(data) {
-  const el = document.getElementById('positions-table');
-  if (!data.positions.length) {
-    el.innerHTML = '<div class="empty">Nenhuma posição aberta.</div>';
+  const el = document.getElementById('positions-body');
+  if (!data.positions || !data.positions.length) {
+    el.innerHTML = `
+      <div class="empty">
+        <span class="empty-icon">📭</span>
+        <div><b>Nenhuma posição aberta</b></div>
+        <div class="empty-hint">
+          Quando o bot executar sua primeira ordem de BUY, aparece aqui com
+          entry price, preço atual e PnL latente.
+        </div>
+      </div>`;
     return;
   }
-  let html = '<table><thead><tr><th>Market</th><th>Outcome</th><th>Size</th><th>Entry</th><th>Current</th><th>Unrealized PnL</th><th>Opened</th></tr></thead><tbody>';
+  let html = '<table class="data-table"><thead><tr>' +
+    '<th>Mercado</th><th>Outcome</th><th>Size</th>' +
+    '<th>Entry</th><th>Atual</th><th>PnL</th><th>Aberta</th></tr></thead><tbody>';
   for (const p of data.positions) {
-    const pnlCls = fmt.pnlClass(p.unrealized_pnl);
-    const title = (p.market_title || '—').slice(0, 55);
+    const cls = fmt.pnlClass(p.unrealized_pnl);
+    const title = p.market_title || '—';
     html += `<tr>
-      <td class="truncate" title="${(p.market_title||'').replace(/"/g,'&quot;')}">${title}</td>
-      <td>${p.outcome || '—'}</td>
-      <td class="mono">${p.size ? p.size.toFixed(2) : '—'}</td>
-      <td class="mono">${p.avg_entry_price ? p.avg_entry_price.toFixed(3) : '—'}</td>
-      <td class="mono">${p.current_price ? p.current_price.toFixed(3) : '—'}</td>
-      <td class="mono ${pnlCls}">${fmt.pnlPrefix(p.unrealized_pnl)}${fmt.usd(p.unrealized_pnl)}</td>
-      <td class="mono">${fmt.time(p.opened_at)}</td>
+      <td data-label="Mercado" class="truncate" title="${title.replace(/"/g,'&quot;')}">${title.slice(0,60)}</td>
+      <td data-label="Outcome">${p.outcome || '—'}</td>
+      <td data-label="Size" class="mono">${p.size ? p.size.toFixed(2) : '—'}</td>
+      <td data-label="Entry" class="mono">${p.avg_entry_price ? p.avg_entry_price.toFixed(3) : '—'}</td>
+      <td data-label="Atual" class="mono">${p.current_price ? p.current_price.toFixed(3) : '—'}</td>
+      <td data-label="PnL" class="mono ${cls}">${fmt.pnlPrefix(p.unrealized_pnl)}${fmt.usd(p.unrealized_pnl)}</td>
+      <td data-label="Aberta" class="mono">${fmt.time(p.opened_at)}</td>
     </tr>`;
   }
   html += '</tbody></table>';
@@ -356,13 +653,38 @@ function renderPositions(data) {
 }
 
 async function callHalt() {
-  if (!confirm('Trava global? Nenhuma ordem nova será enviada até RESUME.')) return;
+  if (!confirm('Halt global? Nenhuma ordem nova será enviada até RESUME manual.')) return;
   try { await fetch('/halt?reason=dashboard', {method:'POST'}); refresh(); }
   catch (e) { alert('falhou: ' + e); }
 }
 async function callResume() {
   try { await fetch('/resume', {method:'POST'}); refresh(); }
   catch (e) { alert('falhou: ' + e); }
+}
+
+async function refresh() {
+  try {
+    const [ov, wallets, signals, positions, trades] = await Promise.all([
+      j('/api/overview'),
+      j('/api/wallets'),
+      j('/api/signals?limit=50'),
+      j('/api/positions'),
+      j('/api/trades?limit=50'),
+    ]);
+    renderHero(ov);
+    renderKPIs(ov);
+    renderSignals(signals);
+    renderWallets(wallets);
+    renderTrades(trades);
+    renderPositions(positions);
+    document.getElementById('halt-reason').textContent =
+      ov.halted ? `⚠ HALTED: ${ov.halt_reason || 'unknown'}` : '✓ Trading ativo';
+    document.getElementById('last-refresh').textContent =
+      'atualizado ' + new Date().toLocaleTimeString('pt-BR');
+  } catch (e) {
+    console.error('refresh failed', e);
+    document.getElementById('last-refresh').textContent = 'erro no refresh';
+  }
 }
 
 refresh();

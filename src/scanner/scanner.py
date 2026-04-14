@@ -22,6 +22,7 @@ from src.api.data_client import DataAPIClient
 from src.core.config import ScannerConfig
 from src.core.logger import get_logger
 from src.core.state import InMemoryState
+from src.scanner.enrich import enrich_profiles
 from src.scanner.profiler import WalletProfile
 from src.scanner.static_whales import static_whale_profiles
 from src.scanner.wallet_pool import WalletPool
@@ -75,6 +76,11 @@ class Scanner:
                 if extra.address not in seen:
                     profiles.append(extra)
                     seen.add(extra.address)
+
+        # Enriquece cada profile com métricas REAIS da Data API.
+        # Substitui os valores sintéticos (100k/0.75/200) por pnl/win_rate/
+        # volume reais vindos de /value + /traded + /closed-positions.
+        profiles = await enrich_profiles(self._data, profiles)
 
         ranked = self._pool.rank(profiles)
 
