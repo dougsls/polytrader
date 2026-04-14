@@ -180,7 +180,11 @@ async def amain() -> None:
     # Se a VPS reiniciou no meio de um fill, o DB local pode estar defasado
     # em relação à posição on-chain. Pull /positions e reconcilia ANTES de
     # o tracker começar a emitir sinais de SELL (que consultam state RAM).
-    if settings.env.funder_address:
+    # PAPER/DRY-RUN: bot não posta on-chain → wallet vazia na blockchain.
+    # Reconcile compararia DB cheio com on-chain vazio e fecharia TODAS as
+    # posições como "fantasma" (size=0, sem realized_pnl, sem close_reason).
+    # Isso destruía o tracking de PnL no paper. Só rodar em LIVE.
+    if settings.config.executor.mode == "live" and settings.env.funder_address:
         try:
             stats = await reconcile_bot_positions(
                 data_client=data_client,
@@ -197,7 +201,9 @@ async def amain() -> None:
             log.error("position_sync_failed", err=repr(exc))
             notifier.notify(f"⚠️ Position sync falhou no startup: {exc!r}")
     else:
-        log.warning("position_sync_skipped", reason="funder_address_empty")
+        log.info("position_sync_skipped",
+                 reason="paper_mode" if settings.config.executor.mode != "live"
+                                     else "funder_address_empty")
 
     # Phase 5 — EOA credentials prefetch. Em paper/dry-run e sem chave,
     # CLOB fica read-only (post_order cairá em NotImplementedError, que o

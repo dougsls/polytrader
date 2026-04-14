@@ -188,13 +188,32 @@ def build_app(
             "SELECT COUNT(*) FROM tracked_wallets WHERE is_active=1"
         ) as cur:
             active_whales = int((await cur.fetchone())[0])
+        # Capital alocado em posições abertas (custo de aquisição) +
+        # valor atual de mercado dessas posições. Permite ver banca dinâmica.
+        async with shared_conn.execute(
+            "SELECT COALESCE(SUM(size * avg_entry_price), 0), "
+            "       COALESCE(SUM(size * COALESCE(current_price, avg_entry_price)), 0) "
+            "FROM bot_positions WHERE is_open=1"
+        ) as cur:
+            row = await cur.fetchone()
+        invested_in_positions = float(row[0]) if row else 0.0
+        market_value_positions = float(row[1]) if row else 0.0
+        # Saldo "demo" dinâmico: starting bank + realized PnL - capital travado em posições
+        starting_bank = balance_cache.balance_usdc  # paper: max_portfolio_usd
+        cash_available = starting_bank + pnl["realized_total"] - invested_in_positions
+        portfolio_total = cash_available + market_value_positions
 
         return {
             "mode": mode,
             "vps_location": vps_location,
             "uptime_seconds": round(uptime, 1),
-            "balance_usdc": balance_cache.balance_usdc,
+            "balance_usdc": balance_cache.balance_usdc,  # back-compat
             "balance_fresh": balance_cache.is_fresh,
+            "starting_bank": starting_bank,
+            "cash_available": cash_available,
+            "invested_in_positions": invested_in_positions,
+            "market_value_positions": market_value_positions,
+            "portfolio_total": portfolio_total,
             "halted": risk_manager.is_halted if risk_manager else False,
             "halt_reason": risk_manager.halt_reason if risk_manager else None,
             "active_whales": active_whales,

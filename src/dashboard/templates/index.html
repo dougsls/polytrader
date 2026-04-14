@@ -495,10 +495,16 @@ function renderKPIs(ov) {
   document.getElementById('badge-uptime').textContent = `up: ${fmt.uptime(ov.uptime_seconds)}`;
   document.getElementById('badge-halt').style.display = ov.halted ? '' : 'none';
 
-  document.getElementById('kpi-bal').textContent = fmt.usd(ov.balance_usdc);
+  // Saldo dinâmico: portfolio_total = cash + valor de mercado das posições.
+  // Inclui PnL realizado e oscilações das posições abertas.
+  const total = (ov.portfolio_total != null) ? ov.portfolio_total : ov.balance_usdc;
+  const start = ov.starting_bank ?? ov.balance_usdc;
+  const delta = total - start;
+  document.getElementById('kpi-bal').textContent = fmt.usd(total);
   const bs = document.getElementById('kpi-bal-sub');
-  bs.textContent = ov.balance_fresh ? '✓ fresh' : '⚠ stale';
-  bs.className = 'kpi-sub ' + (ov.balance_fresh ? 'positive' : 'negative');
+  const sign = delta >= 0 ? '+' : '';
+  bs.textContent = `${sign}${fmt.usd(delta)} vs banca inicial $${start.toFixed(0)} | cash $${(ov.cash_available ?? 0).toFixed(2)} • posições $${(ov.market_value_positions ?? 0).toFixed(2)}`;
+  bs.className = 'kpi-sub ' + fmt.pnlClass(delta);
 
   const r = ov.pnl.realized_24h;
   const elR = document.getElementById('kpi-pnl24');
