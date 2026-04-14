@@ -246,26 +246,65 @@ def build_app(
 
     @app.get("/api/positions", dependencies=[auth])
     async def api_positions() -> dict[str, Any]:
-        async with shared_conn.execute(
-            "SELECT condition_id, token_id, market_title, outcome, size, "
-            "       avg_entry_price, current_price, unrealized_pnl, "
-            "       source_wallets_json, opened_at "
-            "FROM bot_positions WHERE is_open=1 ORDER BY opened_at DESC"
-        ) as cur:
+        # Abertas + últimas 50 fechadas, join com market cache pra end_date.
+        sql = (
+            "SELECT bp.id, bp.condition_id, bp.token_id, bp.market_title, "
+            "       bp.outcome, bp.size, bp.avg_entry_price, bp.current_price, "
+            "       bp.unrealized_pnl, bp.realized_pnl, bp.is_open, "
+            "       bp.source_wallets_json, bp.opened_at, bp.closed_at, "
+            "       m.end_date "
+            "FROM bot_positions bp "
+            "LEFT JOIN market_metadata_cache m ON m.condition_id = bp.condition_id "
+            "WHERE bp.is_open=1 "
+            "   OR (bp.is_open=0 AND bp.closed_at >= datetime('now', '-30 days')) "
+            "ORDER BY bp.is_open DESC, COALESCE(bp.closed_at, bp.opened_at) DESC "
+            "LIMIT 50"
+        )
+        async with shared_conn.execute(sql) as cur:
             rows = await cur.fetchall()
+        now = datetime.now(timezone.utc)
+        open_list, closed_list = [], []
+        for r in rows:
+            end_date_raw = r[14]
+            hours_left = None
+            if end_date_raw:
+                try:
+                    ed = datetime.fromisoformat(end_date_raw.replace("Z", "+00:00"))
+                    if ed.tzinfo is None:
+                        ed = ed.replace(tzinfo=timezone.utc)
+                    hours_left = (ed - now).total_seconds() / 3600.0
+                except (ValueError, AttributeError):
+                    pass
+            entry = float(r[6]) if r[6] else 0
+            current = float(r[7]) if r[7] else entry
+            pct_pnl = (current - entry) / entry * 100 if entry > 0 else 0.0
+            is_open = bool(r[10])
+            realized = float(r[9]) if r[9] else 0.0
+            outcome_result = None
+            if not is_open:
+                outcome_result = "won" if realized > 0 else ("lost" if realized < 0 else "neutral")
+            item = {
+                "id": r[0], "condition_id": r[1], "token_id": r[2],
+                "market_title": r[3], "outcome": r[4],
+                "size": r[5], "avg_entry_price": r[6],
+                "current_price": r[7], "unrealized_pnl": r[8],
+                "realized_pnl": realized, "pct_pnl": pct_pnl,
+                "is_open": is_open, "outcome_result": outcome_result,
+                "source_wallets_json": r[11],
+                "opened_at": r[12], "closed_at": r[13],
+                "end_date": end_date_raw, "hours_to_resolution": hours_left,
+            }
+            if is_open:
+                open_list.append(item)
+            else:
+                closed_list.append(item)
         return {
-            "open_count": len(rows),
+            "open_count": len(open_list),
+            "closed_count": len(closed_list),
             "ram_cache_tokens": len(state.bot_positions_by_token),
-            "positions": [
-                {
-                    "condition_id": r[0], "token_id": r[1],
-                    "market_title": r[2], "outcome": r[3],
-                    "size": r[4], "avg_entry_price": r[5],
-                    "current_price": r[6], "unrealized_pnl": r[7],
-                    "source_wallets_json": r[8], "opened_at": r[9],
-                }
-                for r in rows
-            ],
+            "positions": open_list,          # back-compat
+            "open": open_list,
+            "closed": closed_list,
         }
 
     @app.get("/api/trades", dependencies=[auth])

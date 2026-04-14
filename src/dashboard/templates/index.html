@@ -438,26 +438,38 @@ function renderHero(ov) {
   const skips = sc.skipped || 0;
 
   if (ov.mode === 'paper') {
-    el.innerHTML = `✅ Bot ativo em <span class="highlight">PAPER MODE</span> — monitorando <span class="highlight">${whales}</span> whales via WebSocket`;
+    el.innerHTML = `✅ Bot ativo em <span class="highlight">PAPER MODE</span> — monitorando <span class="highlight">${whales}</span> whales via polling + WebSocket`;
+    const pnl = ov.pnl || {};
+    const unrealClass = fmt.pnlClass(pnl.unrealized);
+    const realClass = fmt.pnlClass(pnl.realized_total);
     if (execs === 0 && skips === 0 && opens === 0) {
       explain.innerHTML = `
-        Aguardando qualquer uma das ${whales} whales rastreadas postar uma ordem
-        em mercado com resolução &lt; 48h. Assim que detectar, os filtros
-        (slippage, spread, duração, score) rodam e a operação aparece em
-        <b>Atividade</b>. Em paper, nenhuma ordem real é enviada — apenas
-        simulada no banco local pra você avaliar a estratégia.
+        Aguardando qualquer uma das ${whales} whales postar ordem em mercado
+        com resolução &lt; 48h. Cada trade detectado passa pelos filtros
+        (slippage, spread, duração, score) antes de virar "executed".
+        <br><br>
+        <b>Como ler os números acima:</b><br>
+        • <b>PnL Realizado</b> = fechamentos. Atualiza APENAS quando o mercado resolve.<br>
+        • <b>PnL Não Realizado</b> = posições abertas × (preço_atual − preço_entrada). Atualiza a cada 30s.<br>
+        • <b>Sinais 24h</b> = tráfego de whales nas últimas 24h.
       `;
     } else if (opens > 0) {
       explain.innerHTML = `
+        <b class="${unrealClass}">${fmt.pnlPrefix(pnl.unrealized)}${fmt.usd(pnl.unrealized)}</b> PnL latente em
         <b>${opens}</b> ${opens === 1 ? 'posição aberta' : 'posições abertas'} ·
-        <b>${execs}</b> ordem${execs !== 1 ? 's' : ''} executada${execs !== 1 ? 's' : ''} 24h ·
-        <b>${skips}</b> skip${skips !== 1 ? 's' : ''}.
-        Abra a aba <b>Posições</b> pra ver inventário e PnL latente.
+        <b class="${realClass}">${fmt.pnlPrefix(pnl.realized_total)}${fmt.usd(pnl.realized_total)}</b> realizado ·
+        <b>${execs}</b> ${execs !== 1 ? 'ordens' : 'ordem'} 24h ·
+        <b>${skips}</b> skip${skips !== 1 ? 's' : ''}
+        <br><br>
+        📌 Abra <b>Posições</b> pra ver cada aposta com preço atual, % PnL, e <b>quanto falta pra resolver</b>.
+        Preços atualizam a cada 30s via CLOB. Resolução é checada a cada 5min.
+        Quando o mercado fechar (alcançar end_date), o bot marca automaticamente
+        GANHOU ou PERDEU e grava o PnL realizado.
       `;
     } else {
       explain.innerHTML = `
-        <b>${execs}</b> ordens simuladas · <b>${skips}</b> skippadas nas últimas 24h.
-        Sem posições abertas (todas fechadas / SELL completo).
+        <b>${execs}</b> ${execs !== 1 ? 'ordens' : 'ordem'} · <b>${skips}</b> skip${skips !== 1 ? 's' : ''} nas últimas 24h.
+        Todas posições já fecharam — realized PnL: <b class="${realClass}">${fmt.pnlPrefix(pnl.realized_total)}${fmt.usd(pnl.realized_total)}</b>.
       `;
     }
     return;
@@ -618,37 +630,95 @@ function renderTrades(rows) {
   el.innerHTML = html;
 }
 
+function resolveBadge(h) {
+  if (h == null) return '<span class="neutral">—</span>';
+  if (h <= 0) return '<span class="positive">⏰ resolvendo…</span>';
+  if (h < 1) return `<span class="positive">${Math.floor(h * 60)}min</span>`;
+  if (h < 24) return `<span class="positive">${h.toFixed(1)}h</span>`;
+  return `<span class="neutral">${Math.floor(h / 24)}d</span>`;
+}
+
+function renderOpenPositionsTable(list) {
+  let html = '<table class="data-table"><thead><tr>' +
+    '<th>Mercado</th><th>Outcome</th><th>Size</th>' +
+    '<th>Entry</th><th>Atual</th><th>PnL $</th><th>PnL %</th>' +
+    '<th>Resolve em</th><th>Aberta há</th></tr></thead><tbody>';
+  for (const p of list) {
+    const cls = fmt.pnlClass(p.unrealized_pnl);
+    const pctCls = fmt.pnlClass(p.pct_pnl);
+    const title = p.market_title || '—';
+    html += `<tr>
+      <td data-label="Mercado" class="truncate" title="${title.replace(/"/g,'&quot;')}">${title.slice(0,60)}</td>
+      <td data-label="Outcome"><b>${p.outcome || '—'}</b></td>
+      <td data-label="Size" class="mono">${p.size ? p.size.toFixed(2) : '—'}</td>
+      <td data-label="Entry" class="mono">${p.avg_entry_price ? p.avg_entry_price.toFixed(3) : '—'}</td>
+      <td data-label="Atual" class="mono">${p.current_price ? p.current_price.toFixed(3) : '—'}</td>
+      <td data-label="PnL $" class="mono ${cls}">${fmt.pnlPrefix(p.unrealized_pnl)}${fmt.usd(p.unrealized_pnl)}</td>
+      <td data-label="PnL %" class="mono ${pctCls}">${fmt.pnlPrefix(p.pct_pnl)}${p.pct_pnl != null ? p.pct_pnl.toFixed(1) + '%' : '—'}</td>
+      <td data-label="Resolve em" class="mono">${resolveBadge(p.hours_to_resolution)}</td>
+      <td data-label="Aberta há" class="mono neutral">${fmt.time(p.opened_at)}</td>
+    </tr>`;
+  }
+  return html + '</tbody></table>';
+}
+
+function renderClosedPositionsTable(list) {
+  let html = '<table class="data-table"><thead><tr>' +
+    '<th>Mercado</th><th>Outcome</th><th>Size</th>' +
+    '<th>Entry</th><th>Resolveu</th><th>Resultado</th>' +
+    '<th>PnL Realizado</th><th>Fechada há</th></tr></thead><tbody>';
+  for (const p of list) {
+    const cls = fmt.pnlClass(p.realized_pnl);
+    const title = p.market_title || '—';
+    const resultPill = p.outcome_result === 'won'
+      ? '<span class="pill executed">✓ GANHOU</span>'
+      : p.outcome_result === 'lost'
+        ? '<span class="pill failed">✕ PERDEU</span>'
+        : '<span class="pill skipped">—</span>';
+    html += `<tr>
+      <td data-label="Mercado" class="truncate" title="${title.replace(/"/g,'&quot;')}">${title.slice(0,60)}</td>
+      <td data-label="Outcome"><b>${p.outcome || '—'}</b></td>
+      <td data-label="Size" class="mono">${p.size ? p.size.toFixed(2) : '—'}</td>
+      <td data-label="Entry" class="mono">${p.avg_entry_price ? p.avg_entry_price.toFixed(3) : '—'}</td>
+      <td data-label="Resolveu" class="mono">${p.current_price != null ? p.current_price.toFixed(2) : '—'}</td>
+      <td data-label="Resultado">${resultPill}</td>
+      <td data-label="PnL Realizado" class="mono ${cls}">${fmt.pnlPrefix(p.realized_pnl)}${fmt.usd(p.realized_pnl)}</td>
+      <td data-label="Fechada há" class="mono neutral">${fmt.time(p.closed_at)}</td>
+    </tr>`;
+  }
+  return html + '</tbody></table>';
+}
+
 function renderPositions(data) {
   const el = document.getElementById('positions-body');
-  if (!data.positions || !data.positions.length) {
+  const openList = data.open || data.positions || [];
+  const closedList = data.closed || [];
+  if (!openList.length && !closedList.length) {
     el.innerHTML = `
       <div class="empty">
         <span class="empty-icon">📭</span>
-        <div><b>Nenhuma posição aberta</b></div>
+        <div><b>Nenhuma posição ainda</b></div>
         <div class="empty-hint">
           Quando o bot executar sua primeira ordem de BUY, aparece aqui com
-          entry price, preço atual e PnL latente.
+          entry, preço atual e PnL latente. Quando o mercado resolver, vira
+          "ganhou" ou "perdeu" automaticamente.
         </div>
       </div>`;
     return;
   }
-  let html = '<table class="data-table"><thead><tr>' +
-    '<th>Mercado</th><th>Outcome</th><th>Size</th>' +
-    '<th>Entry</th><th>Atual</th><th>PnL</th><th>Aberta</th></tr></thead><tbody>';
-  for (const p of data.positions) {
-    const cls = fmt.pnlClass(p.unrealized_pnl);
-    const title = p.market_title || '—';
-    html += `<tr>
-      <td data-label="Mercado" class="truncate" title="${title.replace(/"/g,'&quot;')}">${title.slice(0,60)}</td>
-      <td data-label="Outcome">${p.outcome || '—'}</td>
-      <td data-label="Size" class="mono">${p.size ? p.size.toFixed(2) : '—'}</td>
-      <td data-label="Entry" class="mono">${p.avg_entry_price ? p.avg_entry_price.toFixed(3) : '—'}</td>
-      <td data-label="Atual" class="mono">${p.current_price ? p.current_price.toFixed(3) : '—'}</td>
-      <td data-label="PnL" class="mono ${cls}">${fmt.pnlPrefix(p.unrealized_pnl)}${fmt.usd(p.unrealized_pnl)}</td>
-      <td data-label="Aberta" class="mono">${fmt.time(p.opened_at)}</td>
-    </tr>`;
+  let html = '';
+  if (openList.length) {
+    html += `<div style="padding:10px 14px;background:var(--panel3);border-bottom:1px solid var(--border-soft);font-size:11px;letter-spacing:0.5px;text-transform:uppercase;color:var(--muted);font-weight:600;"><b>🟢 ${openList.length} ${openList.length === 1 ? 'aberta' : 'abertas'}</b> — aguardando resolução do mercado</div>`;
+    html += renderOpenPositionsTable(openList);
   }
-  html += '</tbody></table>';
+  if (closedList.length) {
+    const wins = closedList.filter(p => p.outcome_result === 'won').length;
+    const losses = closedList.filter(p => p.outcome_result === 'lost').length;
+    const totalR = closedList.reduce((s, p) => s + (p.realized_pnl || 0), 0);
+    const wrPct = wins + losses > 0 ? (wins / (wins + losses) * 100).toFixed(0) + '%' : '—';
+    html += `<div style="padding:10px 14px;background:var(--panel3);border-bottom:1px solid var(--border-soft);border-top:1px solid var(--border);font-size:11px;letter-spacing:0.5px;text-transform:uppercase;color:var(--muted);font-weight:600;"><b>🏁 ${closedList.length} resolvidas</b> — <span class="positive">${wins} ganhas</span> · <span class="negative">${losses} perdidas</span> · WR ${wrPct} · PnL total <span class="${fmt.pnlClass(totalR)}">${fmt.pnlPrefix(totalR)}${fmt.usd(totalR)}</span></div>`;
+    html += renderClosedPositionsTable(closedList);
+  }
   el.innerHTML = html;
 }
 

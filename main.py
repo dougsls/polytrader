@@ -32,6 +32,8 @@ from src.dashboard.app import build_app as build_dashboard
 from src.executor.balance_cache import BalanceCache
 from src.executor.copy_engine import CopyEngine
 from src.executor.position_sync import reconcile_bot_positions
+from src.executor.price_updater import price_update_loop
+from src.executor.resolution_watcher import resolution_check_loop
 from src.executor.risk_manager import RiskManager
 from src.executor.risk_state import build_risk_state
 from src.executor.stale_cleanup import stale_position_cleanup_loop
@@ -410,6 +412,14 @@ async def amain() -> None:
             name="latency-monitor",
         ),
         asyncio.create_task(dashboard_server.serve(), name="dashboard"),
+        asyncio.create_task(
+            price_update_loop(shutdown=shutdown, conn=shared_conn, clob=clob),
+            name="price-updater",
+        ),
+        asyncio.create_task(
+            resolution_check_loop(shutdown=shutdown, conn=shared_conn, gamma=gamma),
+            name="resolution-watcher",
+        ),
         asyncio.create_task(
             stale_position_cleanup_loop(
                 shutdown=shutdown, cfg=settings.config.executor,
