@@ -668,6 +668,9 @@ function renderOpenPositionsTable(list) {
     '<th title="Preço atual do outcome no mercado (atualiza a cada 30s)">Atual</th>' +
     '<th title="PnL não-realizado em USD: (preço_atual - entry) × size">PnL $</th>' +
     '<th title="Variação percentual desde a entrada">PnL %</th>' +
+    '<th title="Lucro MÁXIMO possível se o outcome ganhar: size × (1 - entry). Cada token vale $1 na vitória.">Pode Ganhar $</th>' +
+    '<th title="ROI máximo se o outcome ganhar: (1 - entry) / entry × 100%">Pode Ganhar %</th>' +
+    '<th title="Risco MÁXIMO de perda se o outcome perder: size × entry (todo capital investido na posição)">Pode Perder $</th>' +
     '<th title="Tempo até o mercado resolver e definirmos vitória/derrota">Resolve em</th>' +
     '<th title="Tempo desde que a primeira ordem foi preenchida">Aberta há</th></tr></thead><tbody>';
   for (const p of list) {
@@ -682,6 +685,9 @@ function renderOpenPositionsTable(list) {
       <td data-label="Atual" class="mono">${p.current_price ? p.current_price.toFixed(3) : '—'}</td>
       <td data-label="PnL $" class="mono ${cls}">${fmt.pnlPrefix(p.unrealized_pnl)}${fmt.usd(p.unrealized_pnl)}</td>
       <td data-label="PnL %" class="mono ${pctCls}">${fmt.pnlPrefix(p.pct_pnl)}${p.pct_pnl != null ? p.pct_pnl.toFixed(1) + '%' : '—'}</td>
+      <td data-label="Pode Ganhar $" class="mono positive">+$${(p.size && p.avg_entry_price != null) ? (p.size * (1 - p.avg_entry_price)).toFixed(2) : '—'}</td>
+      <td data-label="Pode Ganhar %" class="mono positive">+${(p.avg_entry_price && p.avg_entry_price > 0) ? ((1 - p.avg_entry_price) / p.avg_entry_price * 100).toFixed(0) + '%' : '—'}</td>
+      <td data-label="Pode Perder $" class="mono negative">-$${(p.size && p.avg_entry_price != null) ? (p.size * p.avg_entry_price).toFixed(2) : '—'}</td>
       <td data-label="Resolve em" class="mono">${resolveBadge(p.hours_to_resolution)}</td>
       <td data-label="Aberta há" class="mono neutral">${fmt.time(p.opened_at)}</td>
     </tr>`;
