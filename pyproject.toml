@@ -20,6 +20,8 @@ dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0",
     "structlog>=24.0",
+    # Nota: `systemd-python` (sd_notify) vem do apt (python3-systemd) no
+    # provision_vps.sh — não é dep PyPI pra evitar build nativo em dev.
     "tenacity>=9.0",
     "uvicorn[standard]>=0.32.0",
     "uvloop>=0.21 ; sys_platform != 'win32'",

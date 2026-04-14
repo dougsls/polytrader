@@ -37,13 +37,19 @@ class MarketSpec:
 
 @dataclass(frozen=True, slots=True)
 class OrderDraft:
-    """Ordem pronta para assinatura EIP-712 + postOrder."""
+    """Ordem pronta para assinatura EIP-712 + postOrder.
+
+    `tick_size` é propagado aqui (além de já estar no MarketSpec) para que
+    o clob_client construa `PartialCreateOrderOptions(tick_size=..., neg_risk=...)`
+    sem precisar de outro lookup no cache.
+    """
 
     token_id: str
     side: Side
     price: Decimal
     size: Decimal
-    neg_risk: bool  # Direciona o SDK ao exchange correto
+    neg_risk: bool
+    tick_size: Decimal
 
 
 def build_order(
@@ -70,4 +76,5 @@ def build_order(
         price=price,
         size=size,
         neg_risk=spec.neg_risk,
+        tick_size=spec.tick_size,
     )

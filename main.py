@@ -39,10 +39,57 @@ log = get_logger(__name__)
 
 HEARTBEAT_INTERVAL_SECONDS = 60
 
+# sd_notify — habilitado apenas em Linux com systemd. Em Windows/dev o
+# ImportError é engolido; o bot vira no-op e segue vivo.
+try:
+    from systemd.daemon import notify as _sd_notify  # type: ignore[import-not-found]
+    _HAS_SYSTEMD = True
+except ImportError:
+    _HAS_SYSTEMD = False
+
+    def _sd_notify(_msg: str) -> int:  # fallback
+        return 0
+
+
+async def latency_monitor_loop(
+    shutdown: asyncio.Event,
+    *,
+    interval_s: int,
+    threshold_ms: int,
+    notifier: "TelegramNotifier",
+) -> None:
+    """Roda latency_baseline periodicamente; alerta se qualquer rota
+    exceder o threshold de forma persistente (2 probes consecutivos)."""
+    consecutive_high: dict[str, int] = {}
+    while not shutdown.is_set():
+        try:
+            rtts = await latency_baseline()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("latency_monitor_probe_failed", err=repr(exc))
+            rtts = {}
+        for target, rtt in rtts.items():
+            if rtt is None or rtt <= threshold_ms:
+                consecutive_high[target] = 0
+                continue
+            consecutive_high[target] = consecutive_high.get(target, 0) + 1
+            if consecutive_high[target] >= 2:
+                notifier.notify(
+                    f"⚠️ Latência alta em {target}: {rtt:.0f}ms "
+                    f"(threshold {threshold_ms}ms, probes consecutivos {consecutive_high[target]})"
+                )
+        try:
+            await asyncio.wait_for(shutdown.wait(), timeout=interval_s)
+        except asyncio.TimeoutError:
+            pass
+
 
 async def heartbeat_loop(shutdown: asyncio.Event) -> None:
     while not shutdown.is_set():
-        log.info("heartbeat")
+        log.info("heartbeat", systemd=_HAS_SYSTEMD)
+        # Avisa systemd que o processo está vivo (WatchdogSec=120 na unit).
+        # Sem isso, systemd mata e reinicia a cada 120s em produção.
+        if _HAS_SYSTEMD:
+            _sd_notify("WATCHDOG=1")
         try:
             await asyncio.wait_for(shutdown.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
@@ -234,6 +281,15 @@ async def amain() -> None:
         asyncio.create_task(engine.run_loop(), name="copy-engine"),
         asyncio.create_task(balance_cache.run_loop(), name="balance-cache"),
         asyncio.create_task(refresh_risk_state(), name="risk-state-refresh"),
+        asyncio.create_task(
+            latency_monitor_loop(
+                shutdown,
+                interval_s=settings.env.latency_probe_interval_seconds,
+                threshold_ms=settings.env.latency_alert_threshold_ms,
+                notifier=notifier,
+            ),
+            name="latency-monitor",
+        ),
     ]
 
     notifier.notify(

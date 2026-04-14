@@ -59,6 +59,14 @@ class Scanner:
             return
 
         ranked = self._pool.rank(profiles)
+
+        # Safety: Rate-limit ou erro transiente zera `profiles`. Se
+        # fizermos sync com ranked=[], TODAS as carteiras ativas viram
+        # is_active=0 e o bot perde 1h de operação. Preserva pool atual.
+        if not ranked and not profiles:
+            log.warning("scanner_empty_result_skipping_sync", active=len(self._active))
+            return
+
         previous = set(self._active)
         await self._pool.sync(ranked)  # muta self._pool.active_addresses in-place
 

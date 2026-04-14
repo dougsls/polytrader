@@ -19,8 +19,6 @@ from src.core.logger import get_logger
 
 log = get_logger(__name__)
 
-POLYGON_CHAIN_ID = 137
-
 
 @dataclass(frozen=True, slots=True)
 class L2Credentials:
@@ -64,11 +62,9 @@ async def prefetch_credentials(
         from py_clob_client.client import ClobClient  # type: ignore[import-not-found]
         from py_clob_client.constants import POLYGON  # type: ignore[import-not-found]
 
-        chain = POLYGON if POLYGON == POLYGON_CHAIN_ID else POLYGON_CHAIN_ID
-
         # Standard signer
         std = ClobClient(
-            host=host, key=private_key, chain_id=chain,
+            host=host, key=private_key, chain_id=POLYGON,
             funder=funder, signature_type=signature_type,
         )
         creds = std.create_or_derive_api_creds()

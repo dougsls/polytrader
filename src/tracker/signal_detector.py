@@ -35,21 +35,6 @@ _signal_counter = count(0)
 log = get_logger(__name__)
 
 
-async def _bot_position_size(
-    token_id: str,
-    *,
-    db_path: Path = DEFAULT_DB_PATH,
-) -> float:
-    async with get_connection(db_path) as db:
-        async with db.execute(
-            "SELECT COALESCE(SUM(size), 0) FROM bot_positions "
-            "WHERE token_id=? AND is_open=1",
-            (token_id,),
-        ) as cur:
-            row = await cur.fetchone()
-    return float(row[0]) if row and row[0] else 0.0
-
-
 def _hours_to_resolution(end_date_iso: str | None) -> float | None:
     if not end_date_iso:
         return None
@@ -108,10 +93,14 @@ async def detect_signal(
     market = await gamma.get_market(condition_id)
     end_iso = market.get("end_date_iso") or market.get("end_date")
     # Inlined de _hours_to_resolution — usa `now` já capturado acima.
+    # Polymarket rotaciona formatos (Z / +00:00 / naive). Normaliza tz.
     if end_iso:
         end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
         hours = (end_dt - now).total_seconds() / 3600.0
     else:
+        end_dt = None
         hours = None
     f = cfg.market_duration_filter
     if f.enabled:
@@ -197,11 +186,8 @@ async def detect_signal(
     )
 
     # model_construct pula validação — dados vêm do nosso código, não de input
-    # externo. Em prod o TradeSignal sai do signal_detector e entra no executor
-    # como objeto interno confiável; não há usuário fornecendo esses campos.
-    market_end_date = (
-        datetime.fromisoformat(end_iso.replace("Z", "+00:00")) if end_iso else None
-    )
+    # externo. Reutiliza end_dt já parseado + normalizado acima (sem 2º parse).
+    market_end_date = end_dt
     # ID = ns-timestamp + counter (~100× mais rápido que uuid4, ainda único
     # por processo). Persistência no DB usa PRIMARY KEY; não precisa ser RFC4122.
     signal_id = f"{time.time_ns()}-{next(_signal_counter)}"

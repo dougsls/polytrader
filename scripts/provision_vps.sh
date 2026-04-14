@@ -15,6 +15,7 @@ sudo apt update && sudo apt upgrade -y
 sudo apt install -y \
     build-essential \
     python3.12 python3.12-venv python3.12-dev \
+    python3-systemd \
     git curl wget sqlite3 ufw htop tmux jq
 
 # 3. uv (package manager)
@@ -37,6 +38,12 @@ cd /opt/polytrader
 # 6. Ambiente Python
 uv venv
 uv sync
+
+# 6b. systemd-python (sd_notify no heartbeat) — fora do pyproject pra não
+# quebrar dev em Windows/Mac. Aqui compila limpo porque python3-systemd
+# já instalou libsystemd-dev acima.
+./.venv/bin/pip install "systemd-python>=235" || \
+    echo "⚠️  systemd-python pip install falhou — heartbeat não fará WATCHDOG=1 (bot funciona mesmo assim)."
 
 # 7. .env a partir do template — usuário edita depois
 if [ ! -f .env ]; then

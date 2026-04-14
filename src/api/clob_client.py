@@ -119,8 +119,12 @@ class CLOBClient:
         loop = asyncio.get_running_loop()
 
         def _build_and_post() -> dict[str, Any]:
-            # py-clob-client: OrderArgs + create_and_post_order
-            from py_clob_client.clob_types import OrderArgs, OrderType  # type: ignore[import-not-found]
+            # py-clob-client: OrderArgs + PartialCreateOrderOptions (neg_risk, tick_size)
+            from py_clob_client.clob_types import (  # type: ignore[import-not-found]
+                OrderArgs,
+                OrderType,
+                PartialCreateOrderOptions,
+            )
 
             args = OrderArgs(
                 token_id=draft.token_id,
@@ -128,8 +132,15 @@ class CLOBClient:
                 size=float(draft.size),
                 side=draft.side,
             )
+            # Diretiva 4 — passa flag neg_risk + tick_size ao SDK.
+            # Sem isso, o SDK usa o exchange CTF padrão → HTTP 400 em
+            # mercados multi-outcome, ou netting quebrado.
+            options = PartialCreateOrderOptions(
+                neg_risk=draft.neg_risk,
+                tick_size=str(draft.tick_size),  # SDK espera str literal ("0.01", "0.001"...)
+            )
             ot = getattr(OrderType, order_type, OrderType.GTC)
-            order = signer.create_order(args)
+            order = signer.create_order(args, options=options)
             resp: dict[str, Any] = signer.post_order(order, orderType=ot)
             return resp
 
