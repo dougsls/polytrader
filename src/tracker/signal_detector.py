@@ -94,7 +94,11 @@ async def detect_signal(
 
     # --- Filtro de duração de mercado -----------------------------------
     market = await gamma.get_market(condition_id)
-    end_iso = market.get("end_date_iso") or market.get("end_date")
+    end_iso = (
+        market.get("end_date_iso")
+        or market.get("end_date")
+        or market.get("endDate")  # Gamma 2026: camelCase
+    )
     # Inlined de _hours_to_resolution — usa `now` já capturado acima.
     # Polymarket rotaciona formatos (Z / +00:00 / naive). Normaliza tz.
     if end_iso:

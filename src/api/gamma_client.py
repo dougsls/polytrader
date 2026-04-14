@@ -103,7 +103,11 @@ class GammaAPIClient:
                     condition_id,
                     market.get("question") or market.get("title"),
                     market.get("slug"),
-                    market.get("end_date_iso") or market.get("end_date"),
+                    (
+                        market.get("end_date_iso")
+                        or market.get("end_date")
+                        or market.get("endDate")  # Gamma 2026: camelCase
+                    ),
                     market.get("expiration"),
                     int(bool(market.get("active"))) if market.get("active") is not None else None,
                     int(bool(market.get("closed"))) if market.get("closed") is not None else None,
@@ -122,16 +126,25 @@ class GammaAPIClient:
             cached = await self._read_cache(condition_id)
             if cached:
                 return cached
-        data = await self._get("/markets", params={"condition_id": condition_id})
+        # Gamma 2026: filter é `condition_ids` (plural); `condition_id` é ignorado.
+        data = await self._get("/markets", params={"condition_ids": condition_id})
+        market: dict[str, Any] | None = None
         if isinstance(data, list):
-            if not data:
-                raise PolymarketAPIError(
-                    f"mercado não encontrado: {condition_id}",
-                    endpoint="/markets", status=404,
-                )
-            market = data[0]
-        else:
+            # Confere cid retornado — em caso raro o filtro falha silenciosamente.
+            for m in data:
+                if (m.get("conditionId") or "").lower() == condition_id.lower():
+                    market = m
+                    break
+            if market is None and data:
+                # Fallback: primeiro resultado (se a API mudar comportamento)
+                market = data[0]
+        elif isinstance(data, dict):
             market = data
+        if market is None:
+            raise PolymarketAPIError(
+                f"mercado não encontrado: {condition_id}",
+                endpoint="/markets", status=404,
+            )
         await self._write_cache(condition_id, market)
         log.info(
             "gamma_market_fetched",
