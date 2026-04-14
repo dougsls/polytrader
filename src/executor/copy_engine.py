@@ -28,10 +28,13 @@ from src.core.exceptions import (
 )
 from src.core.logger import get_logger
 from src.core.models import CopyTrade, RiskState, TradeSignal
+from src.core.state import InMemoryState
 from src.executor.order_manager import build_draft
 from src.executor.position_manager import apply_fill
 from src.executor.risk_manager import RiskManager
 from src.executor.slippage import check_slippage_or_abort
+
+import aiosqlite
 
 log = get_logger(__name__)
 
@@ -47,33 +50,45 @@ class CopyEngine:
         gamma: GammaAPIClient,
         risk: RiskManager,
         queue: asyncio.Queue,
-        state_provider: Callable[[], RiskState],
+        state: InMemoryState,
+        risk_state_provider: Callable[[], RiskState],
         on_event: NotifyCallback = None,
         db_path: Path = DEFAULT_DB_PATH,
+        conn: aiosqlite.Connection | None = None,
     ) -> None:
         self._cfg = cfg
         self._clob = clob
         self._gamma = gamma
         self._risk = risk
         self._queue = queue
-        self._state = state_provider
+        self._state = state                      # InMemoryState (RAM cache)
+        self._risk_state = risk_state_provider   # Callable[[], RiskState]
         self._on_event = on_event
         self._db_path = db_path
+        self._conn = conn
 
     async def _mark_skipped(self, signal: TradeSignal, reason: str) -> None:
-        async with get_connection(self._db_path) as db:
-            await db.execute(
+        # Fase 3 LOW — usa shared_conn em vez de abrir conexão nova.
+        if self._conn is not None:
+            await self._conn.execute(
                 "UPDATE trade_signals SET status='skipped', skip_reason=? WHERE id=?",
                 (reason, signal.id),
             )
-            await db.commit()
+            await self._conn.commit()
+        else:
+            async with get_connection(self._db_path) as db:
+                await db.execute(
+                    "UPDATE trade_signals SET status='skipped', skip_reason=? WHERE id=?",
+                    (reason, signal.id),
+                )
+                await db.commit()
         log.info("signal_skipped", id=signal.id, reason=reason)
         if self._on_event:
             await self._on_event("skipped", signal, None)
 
     async def handle_signal(self, signal: TradeSignal) -> None:
         # 1. Risk gates
-        decision = self._risk.evaluate(signal, self._state())
+        decision = self._risk.evaluate(signal, self._risk_state())
         if not decision.allowed:
             await self._mark_skipped(signal, f"RISK: {decision.reason}")
             return
@@ -123,19 +138,29 @@ class CopyEngine:
             log.info("dry_run_skip_post", trade_id=trade.id)
             return
 
-        # 5. Update positions (paper simula fill pelo preço limite).
+        # 5. Update positions — state cache write-through evita que o
+        # próximo SELL bloqueie por "exit_sync_no_position".
         await apply_fill(
             signal=signal, trade=trade,
             executed_size=executed_size, executed_price=executed_price,
             db_path=self._db_path,
+            state=self._state,
+            conn=self._conn,
         )
 
-        async with get_connection(self._db_path) as db:
-            await db.execute(
+        if self._conn is not None:
+            await self._conn.execute(
                 "UPDATE trade_signals SET status='executed' WHERE id=?",
                 (signal.id,),
             )
-            await db.commit()
+            await self._conn.commit()
+        else:
+            async with get_connection(self._db_path) as db:
+                await db.execute(
+                    "UPDATE trade_signals SET status='executed' WHERE id=?",
+                    (signal.id,),
+                )
+                await db.commit()
 
         if self._on_event:
             await self._on_event("executed", signal, trade)

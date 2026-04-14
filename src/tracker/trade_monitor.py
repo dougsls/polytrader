@@ -6,6 +6,8 @@ executor. Deduplicação por (wallet, condition, token, side, timestamp).
 from __future__ import annotations
 
 import asyncio
+import time
+from collections import OrderedDict
 from pathlib import Path
 
 import aiosqlite
@@ -45,7 +47,10 @@ class TradeMonitor:
         self._db_path = db_path
         self._conn = conn
         self._state = state
-        self._seen: set[tuple[str, str, str, str, int]] = set()
+        # OrderedDict como LRU bounded — evita memory leak em runs longos.
+        # Key = dedup tuple, value = timestamp de inserção (para purga por idade).
+        self._seen: OrderedDict[tuple[str, str, str, str, int], float] = OrderedDict()
+        self._seen_max_size = 50_000
 
     def _dedup_key(self, trade: dict) -> tuple[str, str, str, str, int]:
         return (
@@ -56,12 +61,27 @@ class TradeMonitor:
             int(trade.get("timestamp") or trade.get("time") or 0),
         )
 
+    def _remember(self, key: tuple[str, str, str, str, int]) -> None:
+        """Insere com timestamp + purga entries > signal_max_age OU bound de tamanho."""
+        now = time.monotonic()
+        self._seen[key] = now
+        cutoff = now - float(self._cfg.signal_max_age_seconds)
+        # Purge por idade (percorre do mais antigo; OrderedDict mantém ordem de insert).
+        while self._seen:
+            oldest_key = next(iter(self._seen))
+            if self._seen[oldest_key] >= cutoff:
+                break
+            self._seen.popitem(last=False)
+        # Bound absoluto — safety net se signal_max_age_seconds for muito alto.
+        while len(self._seen) > self._seen_max_size:
+            self._seen.popitem(last=False)
+
     async def run_websocket(self) -> None:
         async for trade in self._ws.stream():
             key = self._dedup_key(trade)
             if key in self._seen:
                 continue
-            self._seen.add(key)
+            self._remember(key)
             wallet = key[0]
             signal = await detect_signal(
                 trade=trade,

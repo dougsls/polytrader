@@ -93,12 +93,22 @@ class RTDSClient:
                         except orjson.JSONDecodeError:
                             continue
                         # Regra 4 — filtro Set() em nanosegundos antes de propagar.
-                        maker = msg.get("maker") or msg.get("makerAddress")
+                        # Defensivo: Polymarket ocasionalmente embrulha em
+                        # payload:/data:. Tenta os 4 paths antes de dropar.
+                        maker = (
+                            msg.get("maker")
+                            or msg.get("makerAddress")
+                            or (msg.get("payload") or {}).get("maker")
+                            or (msg.get("data") or {}).get("maker")
+                        )
                         if maker not in self._tracked:
                             continue
+                        # Se veio embrulhado, desembrulha para o consumer.
+                        inner = msg.get("payload") or msg.get("data")
+                        effective = inner if isinstance(inner, dict) and "maker" in inner else msg
                         if self._on_trade:
-                            self._on_trade(msg)
-                        yield msg
+                            self._on_trade(effective)
+                        yield effective
             except (websockets.WebSocketException, OSError) as e:
                 log.warning("rtds_disconnected", err=repr(e), backoff=backoff)
             finally:

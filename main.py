@@ -23,13 +23,16 @@ from src.api.websocket_client import RTDSClient
 from src.core.config import get_settings
 from src.core.database import DEFAULT_DB_PATH, init_database
 from src.core.logger import configure_logging, get_logger
-from src.core.models import CopyTrade, RiskState, TradeSignal
+from src.core.models import CopyTrade, TradeSignal
 from src.core.state import InMemoryState
 from src.executor.balance_cache import BalanceCache
 from src.executor.copy_engine import CopyEngine
 from src.executor.position_sync import reconcile_bot_positions
 from src.executor.risk_manager import RiskManager
+from src.executor.risk_state import build_risk_state
 from src.notifier.telegram import TelegramNotifier
+from src.scanner.scanner import Scanner
+from src.scanner.wallet_pool import WalletPool
 from src.tracker.trade_monitor import TradeMonitor
 
 log = get_logger(__name__)
@@ -44,20 +47,6 @@ async def heartbeat_loop(shutdown: asyncio.Event) -> None:
             await asyncio.wait_for(shutdown.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
-
-
-def _default_state() -> RiskState:
-    """Estado inicial neutro — Fase 5 (dashboard/DB aggregator) popula de verdade."""
-    return RiskState(
-        total_portfolio_value=0.0,
-        total_invested=0.0,
-        total_unrealized_pnl=0.0,
-        total_realized_pnl=0.0,
-        daily_pnl=0.0,
-        max_drawdown=0.0,
-        current_drawdown=0.0,
-        open_positions=0,
-    )
 
 
 async def amain() -> None:
@@ -153,7 +142,8 @@ async def amain() -> None:
             log.critical("eoa_prefetch_failed", err=repr(exc))
             raise
 
-    # --- pool & tracker ---------------------------------------------------
+    # --- pool, scanner & tracker -----------------------------------------
+    wallet_pool = WalletPool(settings.config.scanner, db_path=DEFAULT_DB_PATH)
     active_wallets: set[str] = set()
     wallet_scores: dict[str, float] = {}
     rtds = RTDSClient(active_wallets)
@@ -163,6 +153,14 @@ async def amain() -> None:
         data_client=data_client, gamma=gamma, ws_client=rtds,
         wallet_scores=wallet_scores, queue=signal_queue,
         conn=shared_conn, state=state,
+    )
+    scanner = Scanner(
+        cfg=settings.config.scanner,
+        data_client=data_client,
+        pool=wallet_pool,
+        active_wallets=active_wallets,
+        wallet_scores=wallet_scores,
+        state=state,
     )
 
     # --- balance cache (Phase 3/5) --------------------------------------
@@ -187,9 +185,32 @@ async def amain() -> None:
         elif kind == "skipped":
             notifier.notify_skip(signal, signal.skip_reason or "unknown")
 
+    # RiskState vivo — task assíncrona refaz snapshot a cada 15s a partir
+    # de balance_cache + bot_positions. Elimina o curto-circuito do mock
+    # zerado que bloqueava tudo por PORTFOLIO_CAP.
+    from src.core.models import RiskState as _RS
+    live_state: dict[str, _RS] = {
+        "rs": await build_risk_state(balance_cache=balance_cache, conn=shared_conn)
+    }
+
+    async def refresh_risk_state() -> None:
+        while not shutdown.is_set():
+            try:
+                live_state["rs"] = await build_risk_state(
+                    balance_cache=balance_cache, conn=shared_conn,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("risk_state_refresh_failed", err=repr(exc))
+            try:
+                await asyncio.wait_for(shutdown.wait(), timeout=15.0)
+            except asyncio.TimeoutError:
+                pass
+
     engine = CopyEngine(
         cfg=settings.config.executor, clob=clob, gamma=gamma, risk=risk,
-        queue=signal_queue, state_provider=_default_state, on_event=on_event,
+        queue=signal_queue, state=state,
+        risk_state_provider=lambda: live_state["rs"],
+        on_event=on_event, conn=shared_conn,
     )
 
     # --- graceful shutdown ------------------------------------------------
@@ -208,9 +229,11 @@ async def amain() -> None:
 
     tasks = [
         asyncio.create_task(heartbeat_loop(shutdown), name="heartbeat"),
+        asyncio.create_task(scanner.run_loop(), name="scanner"),
         asyncio.create_task(monitor.run_websocket(), name="tracker-ws"),
         asyncio.create_task(engine.run_loop(), name="copy-engine"),
         asyncio.create_task(balance_cache.run_loop(), name="balance-cache"),
+        asyncio.create_task(refresh_risk_state(), name="risk-state-refresh"),
     ]
 
     notifier.notify(
@@ -222,6 +245,7 @@ async def amain() -> None:
     log.info("shutting_down")
 
     await rtds.close()
+    await scanner.stop()
     await balance_cache.stop()
     for t in tasks:
         t.cancel()
