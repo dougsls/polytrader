@@ -453,6 +453,13 @@ async def amain() -> None:
 
 
 def main() -> None:
+    # uvloop: event loop em C, 2-4× mais rápido que asyncio default em I/O.
+    # Só instala em Linux/Mac (sys_platform != win32 marker já no pyproject).
+    try:
+        import uvloop  # type: ignore[import-not-found]
+        uvloop.install()
+    except ImportError:
+        pass  # Windows / dev local cai no default asyncio sem quebrar
     try:
         asyncio.run(amain())
     except KeyboardInterrupt:
