@@ -87,8 +87,11 @@ executor:
   # paper_simulate_slippage 0.015 = entry 1.5% pior que whale (book ruim).
   # Combinados: entry efetiva degrada em (fees + slippage). Recomendado
   # pra 7d-paper honesto antes de go-live: 0.01 + 0.01 = 2% de degradação.
-  paper_apply_fees: 0.0
-  paper_simulate_slippage: 0.0
+  # Preset "paper realista": 1% fee + 1% slippage = 2% degradação total.
+  # Essa é a margem típica paper→live; o ROI que você ver nas próximas 24-48h
+  # é ~o que live renderia de verdade.
+  paper_apply_fees: 0.01
+  paper_simulate_slippage: 0.01
 
   max_daily_loss_usd: 100
   max_drawdown_pct: 0.20
