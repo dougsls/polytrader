@@ -81,6 +81,12 @@ executor:
   # da whale. NUNCA ativar em LIVE.
   # Desligue (false) pra aplicar filtros normais de risco + slippage real.
   paper_perfect_mirror: true
+  # RISK MGMT — Cap cumulativo por mercado (% banca ATUAL c/ lucros).
+  # Previne que whale bombardeando 20 trades num BTC Up/Down vire 30%
+  # da banca em UMA única posição. 0.05 = max 5% por mercado.
+  # Com banca $500: max $25/mercado. Banca cresce p/ $800: max $40.
+  # Agressivo: 0.10 (10%). Conservador: 0.03 (3%).
+  max_position_pct_of_bank: 0.05
   # Realismo paper (só fazem sentido se perfect_mirror=true).
   # paper_apply_fees 0.01 = deduz 1% por fill (CLOB fee).
   #   Live real cobra 0.5-2% dependendo de maker/taker.

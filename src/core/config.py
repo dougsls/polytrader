@@ -157,6 +157,11 @@ class ExecutorConfig(_StrictModel):
     # tag exposure/price band). Cada signal vira fake-fill ao preço EXATO
     # da whale. Útil pra observar comportamento bruto. NUNCA ative em LIVE.
     paper_perfect_mirror: bool = False
+    # Concentração: cap cumulativo POR mercado (absoluto + % banca).
+    # Diferente de max_position_usd que é por-fill. Se whale bombardeia um
+    # mercado com 20 trades, sem esse cap a posição acumula sem limite.
+    # Default 5% = em $500 de banca, max $25 em qualquer mercado único.
+    max_position_pct_of_bank: float = Field(default=0.05, ge=0.0, le=0.5)
     # Realismo paper: fees do CLOB aplicadas em cada fill (0.01 = 1%).
     # BUY: paga price*(1+fees). SELL: recebe price*(1-fees). Live real: 0.5-2%.
     paper_apply_fees: float = Field(default=0.0, ge=0.0, le=0.1)

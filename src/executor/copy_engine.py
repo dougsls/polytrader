@@ -126,11 +126,9 @@ class CopyEngine:
             # SELL não consome caixa (é saída de token); permite sempre.
             starting_bank = float(self._cfg.max_portfolio_usd)
             cash_available = starting_bank
+            max_per_market = 0.0
+            remaining_market = 0.0
             if signal.side == "BUY" and self._conn is not None:
-                # Invested = só posições ABERTAS (capital ainda travado).
-                # Realized = todas (fechadas creditam de volta no cash).
-                # Bug anterior: somava size*avg_entry de TODAS, inclusive
-                # fechadas, penalizando duas vezes o capital já liberado.
                 async with self._conn.execute(
                     "SELECT COALESCE(SUM(size*avg_entry_price),0) "
                     "FROM bot_positions WHERE is_open=1"
@@ -143,15 +141,36 @@ class CopyEngine:
                     row = await cur.fetchone()
                 realized = float(row[0]) if row else 0.0
                 cash_available = starting_bank + realized - invested_open
-                # Mínimo Polymarket: $1. Se cash < $1, skip com razão clara.
                 if cash_available < 1.0:
                     await self._mark_skipped(
                         signal,
                         f"INSUFFICIENT_CASH: ${cash_available:.2f} restante de ${starting_bank:.0f}",
                     )
                     return
+                # Cap cumulativo POR mercado (concentração).
+                current_bank = starting_bank + realized
+                max_per_market = current_bank * float(
+                    getattr(self._cfg, "max_position_pct_of_bank", 0.05) or 0.05
+                )
+                async with self._conn.execute(
+                    "SELECT COALESCE(SUM(size*avg_entry_price),0) "
+                    "FROM bot_positions WHERE is_open=1 AND token_id=?",
+                    (signal.token_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+                already_in_market = float(row[0]) if row else 0.0
+                remaining_market = max(0.0, max_per_market - already_in_market)
+                if remaining_market < 1.0:
+                    await self._mark_skipped(
+                        signal,
+                        f"MARKET_CAP: ${already_in_market:.2f} já alocado neste mercado "
+                        f"(cap ${max_per_market:.2f} = {self._cfg.max_position_pct_of_bank:.0%} da banca)",
+                    )
+                    return
             target = starting_bank * self._cfg.proportional_factor
             sized = min(target, self._cfg.max_position_usd, cash_available)
+            if signal.side == "BUY" and max_per_market > 0:
+                sized = min(sized, remaining_market)
             sized = max(sized, 1.0)  # Polymarket mín $1
             class _D:
                 allowed = True
