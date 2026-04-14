@@ -496,7 +496,7 @@
             <th>Entry</th>
             <th>Atual/Saída</th>
             <th title="Quantidade de ordens individuais (fills) que compõem esta posição agregada">Fills</th>
-            <th>Size</th>
+            <th title="Valor em USD investido na posição (size × entry). Ao lado: quantidade de tokens.">Investido</th>
             <th>PnL $</th>
             <th>PnL %</th>
             <th>Potencial</th>
@@ -577,6 +577,34 @@ const fmt = {
     if (diff < 86400) return `${Math.floor(diff/3600)}h atrás`;
     return `${Math.floor(diff/86400)}d atrás`;
   },
+  // Data/hora em Brasília (UTC-3 fixo, sem horário de verão desde 2019).
+  brt: iso => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    // America/Sao_Paulo via Intl é a forma correta (DST automático se voltar):
+    const opts = { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+                   year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false };
+    const parts = new Intl.DateTimeFormat('pt-BR', opts).formatToParts(d);
+    const get = t => parts.find(p => p.type === t)?.value || '';
+    return `${get('day')}/${get('month')}/${get('year')} ${get('hour')}:${get('minute')} BRT`;
+  },
+  brtShort: iso => {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    const opts = { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit',
+                   hour: '2-digit', minute: '2-digit', hour12: false };
+    const parts = new Intl.DateTimeFormat('pt-BR', opts).formatToParts(d);
+    const get = t => parts.find(p => p.type === t)?.value || '';
+    return `${get('day')}/${get('month')} ${get('hour')}:${get('minute')}`;
+  },
+  countdown: iso => {
+    if (!iso) return '—';
+    const diff = (new Date(iso).getTime() - Date.now()) / 1000;
+    if (diff <= 0) return '⏰ resolvendo agora';
+    if (diff < 3600) return `em ${Math.floor(diff/60)}min`;
+    if (diff < 86400) return `em ${Math.floor(diff/3600)}h ${Math.floor((diff%3600)/60)}min`;
+    return `em ${Math.floor(diff/86400)}d ${Math.floor((diff%86400)/3600)}h`;
+  },
   uptime: s => {
     if (!s) return '—';
     if (s < 60) return `${Math.floor(s)}s`;
@@ -595,7 +623,11 @@ async function api(path) {
 /* ============== CLOCK + TOPBAR ============== */
 function tickClock() {
   const d = new Date();
-  $('clock').textContent = d.toISOString().substring(11, 19) + ' UTC';
+  const brt = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit',
+    second: '2-digit', hour12: false,
+  }).format(d);
+  $('clock').textContent = `${brt} BRT · ${d.toISOString().substring(11, 19)} UTC`;
 }
 setInterval(tickClock, 1000); tickClock();
 
@@ -922,8 +954,10 @@ function renderLedger() {
     const resolveIn = p.hours_to_resolution != null
       ? (p.hours_to_resolution <= 0 ? '⏰ resolvendo' : (p.hours_to_resolution < 1 ? `${Math.floor(p.hours_to_resolution*60)}min` : `${p.hours_to_resolution.toFixed(1)}h`))
       : '—';
+    const resolveBrt = p.end_date ? fmt.brtShort(p.end_date) : '';
+    const whenAbs = fmt.brtShort(when);
     return `<tr class="${rowClass}" data-pid="${p.id}">
-      <td data-label="Quando" class="dim mono">${fmt.time(when)}</td>
+      <td data-label="Quando" class="dim mono" title="${fmt.brt(when)}">${fmt.time(when)}<div style="font-size:10px;color:var(--text-dim);">${whenAbs}</div></td>
       <td data-label="Status">${statusBadge}</td>
       <td data-label="Mercado" class="cell-mkt" title="${(p.market_title||'').replace(/"/g,'&quot;')}">${p.market_title || '—'}</td>
       <td data-label="Outcome"><b>${p.outcome || '—'}</b></td>
@@ -931,11 +965,11 @@ function renderLedger() {
       <td data-label="Entry" class="mono">${fmt.price(p.avg_entry_price)}</td>
       <td data-label="Atual" class="mono">${fmt.price(p.current_price)}</td>
       <td data-label="Fills" class="mono" title="${p.buy_fills||0} BUYs · ${p.sell_fills||0} SELLs"><span class="badge" style="background:var(--info-dim);color:var(--info);">×${p.fills || 0}</span></td>
-      <td data-label="Size" class="mono">${p.size ? p.size.toFixed(2) : '—'}</td>
+      <td data-label="Investido" class="mono"><b>${fmt.usd((p.size||0) * (p.avg_entry_price||0))}</b><div style="font-size:10px;color:var(--text-3);">${p.size ? p.size.toFixed(2) : '—'} tokens</div></td>
       <td data-label="PnL $" class="mono ${fmt.cls(pnl)}">${fmt.usdSigned(pnl)}</td>
       <td data-label="PnL %" class="mono ${fmt.cls(p.pct_pnl)}">${fmt.pct(p.pct_pnl)}</td>
       <td data-label="Potencial" class="mono ${atTop ? 'dim' : 'gain'}">${atTop ? '⚠️' : '+'}${fmt.usd(potential)}</td>
-      <td data-label="Resolve em" class="mono dim">${resolveIn}</td>
+      <td data-label="Resolve em" class="mono dim" title="${p.end_date ? fmt.brt(p.end_date) : ''}">${resolveIn}${resolveBrt ? `<div style="font-size:10px;color:var(--text-dim);">${resolveBrt}</div>` : ''}</td>
     </tr>`;
   }).join('');
 }
@@ -1022,35 +1056,47 @@ async function openDrawer(pid) {
 
       <h4>Resumo Financeiro</h4>
       <div class="kv-grid">
-        <div class="k">Size</div><div class="v">${(p.size||0).toFixed(2)} tokens</div>
+        <div class="k">💵 Valor aportado</div><div class="v"><b>${fmt.usd(risk)}</b></div>
+        <div class="k">🎟️ Quantidade</div><div class="v">${(p.size||0).toFixed(2)} tokens</div>
         <div class="k">Entry médio</div><div class="v">${fmt.price(p.avg_entry_price)}</div>
         <div class="k">Preço atual/saída</div><div class="v">${fmt.price(p.current_price)}</div>
-        <div class="k">Capital em risco</div><div class="v loss">${fmt.usd(risk)}</div>
-        <div class="k">Ganho potencial</div><div class="v ${p.avg_entry_price >= 0.99 ? 'dim' : 'gain'}">${p.avg_entry_price >= 0.99 ? '⚠️ sem upside' : '+' + fmt.usd(maxGain)}</div>
+        <div class="k">⚠️ Máximo que posso perder</div><div class="v loss">-${fmt.usd(risk)}</div>
+        <div class="k">💎 Máximo que posso ganhar</div><div class="v ${p.avg_entry_price >= 0.99 ? 'dim' : 'gain'}">${p.avg_entry_price >= 0.99 ? '⚠️ sem upside' : '+' + fmt.usd(maxGain)}</div>
         <div class="k">ROI máx se ganhar</div><div class="v ${p.avg_entry_price >= 0.99 ? 'dim' : 'gain'}">+${roi.toFixed(0)}%</div>
-        <div class="k">PnL ${p.is_open ? 'latente' : 'realizado'}</div><div class="v ${fmt.cls(pnl)}">${fmt.usdSigned(pnl)}</div>
+        <div class="k">PnL ${p.is_open ? 'latente (agora)' : 'realizado'}</div><div class="v ${fmt.cls(pnl)}">${fmt.usdSigned(pnl)}</div>
       </div>
 
       <h4>Timeline</h4>
       <div class="timeline">
         ${timelineItems.map(i => `
           <div class="tl-item ${i.kind}">
-            <div class="tl-time">${new Date(i.time).toISOString().replace('T',' ').substring(0,19)} UTC · ${fmt.time(i.time)}</div>
+            <div class="tl-time">${fmt.brt(i.time)} · ${fmt.time(i.time)}</div>
             <div class="tl-title">${i.title}</div>
             <div class="tl-desc">${i.desc}</div>
           </div>
         `).join('')}
       </div>
 
+      <h4>⏰ Quando Vou Saber o Resultado</h4>
+      <div class="kv-grid">
+        <div class="k">Horário Brasília</div><div class="v gain" style="font-size:13px;">${endDate ? fmt.brt(endDate) : '—'}</div>
+        <div class="k">Horário UTC</div><div class="v">${endDate ? new Date(endDate).toISOString().substring(0,16).replace('T',' ') + ' UTC' : '—'}</div>
+        <div class="k">Faltam</div><div class="v ${endDate && (new Date(endDate).getTime() - Date.now()) / 3600000 < 2 ? 'warn' : ''}">${endDate ? fmt.countdown(endDate) : '—'}</div>
+      </div>
+
       <h4>Metadata</h4>
       <div class="kv-grid">
-        <div class="k">Resolução prevista</div><div class="v">${endDate ? new Date(endDate).toISOString().substring(0,16).replace('T',' ') + ' UTC' : '—'}</div>
         <div class="k">Whales origem</div><div class="v" style="font-size:10px;">${(p.source_wallets || []).map(w => `<a class="whale-link" href="https://polymarket.com/profile/${w}" target="_blank" rel="noopener" style="color:var(--info);">🐋 ${w.slice(0,8)}… ↗</a>`).join(' · ') || '—'}</div>
         <div class="k">Condition ID</div><div class="v" style="font-size:10px;word-break:break-all;text-align:right;">${(p.condition_id || '').substring(0, 24)}…</div>
+        <div class="k">Slug</div><div class="v" style="font-size:10px;text-align:right;">${d.market?.slug || '—'}</div>
       </div>
 
       <h4>Links Externos</h4>
-      <a href="https://polymarket.com/${d.market?.slug ? 'event/' + d.market.slug : ''}" target="_blank" style="color:var(--info);font-size:12px;text-decoration:none;">→ Abrir no Polymarket</a>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        ${d.market?.slug ? `<a href="https://polymarket.com/event/${d.market.slug}" target="_blank" rel="noopener" style="color:var(--info);font-size:12px;text-decoration:none;">→ Abrir evento no Polymarket ↗</a>` : ''}
+        <a href="https://polymarket.com/markets?_q=${encodeURIComponent(p.market_title || '')}" target="_blank" rel="noopener" style="color:var(--info);font-size:12px;text-decoration:none;">→ Buscar "${(p.market_title || '').slice(0, 40)}" no Polymarket ↗</a>
+        ${(p.source_wallets || []).length ? `<a href="https://polymarket.com/profile/${p.source_wallets[0]}" target="_blank" rel="noopener" style="color:var(--info);font-size:12px;text-decoration:none;">→ Ver perfil da whale origem ↗</a>` : ''}
+      </div>
     `;
   } catch (e) {
     $('dr-body').innerHTML = '<div style="color:var(--loss);padding:20px;">Erro ao carregar: ' + e + '</div>';
