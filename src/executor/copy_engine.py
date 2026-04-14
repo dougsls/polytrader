@@ -119,10 +119,33 @@ class CopyEngine:
         )
 
         if perfect_mirror:
-            # Tamanho fixo: usa whale_proportional fórmula direto sem gates.
-            sized = max(self._risk_state().total_portfolio_value, 1.0) \
-                    * self._cfg.proportional_factor
-            sized = min(sized, self._cfg.max_position_usd)
+            # Realista: sizing respeita cash DISPONÍVEL (banca - capital
+            # travado em posições abertas + realized PnL). Sem isso, o
+            # paper simula investir $32k com banca de $50 — distorce toda
+            # análise de viabilidade do bot em live.
+            # SELL não consome caixa (é saída de token); permite sempre.
+            starting_bank = float(self._cfg.max_portfolio_usd)
+            cash_available = starting_bank
+            if signal.side == "BUY" and self._conn is not None:
+                async with self._conn.execute(
+                    "SELECT COALESCE(SUM(size*avg_entry_price),0), "
+                    "       COALESCE(SUM(realized_pnl),0) "
+                    "FROM bot_positions"
+                ) as cur:
+                    row = await cur.fetchone()
+                invested_open = float(row[0]) if row else 0.0
+                realized = float(row[1]) if row else 0.0
+                cash_available = starting_bank + realized - invested_open
+                # Mínimo Polymarket: $1. Se cash < $1, skip com razão clara.
+                if cash_available < 1.0:
+                    await self._mark_skipped(
+                        signal,
+                        f"INSUFFICIENT_CASH: ${cash_available:.2f} restante de ${starting_bank:.0f}",
+                    )
+                    return
+            target = starting_bank * self._cfg.proportional_factor
+            sized = min(target, self._cfg.max_position_usd, cash_available)
+            sized = max(sized, 1.0)  # Polymarket mín $1
             class _D:
                 allowed = True
                 reason = "OK"
