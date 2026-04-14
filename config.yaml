@@ -25,6 +25,10 @@ scanner:
   min_short_term_trade_ratio: 0.50
   short_term_threshold_hours: 48
 
+  # Fallback — usado quando Polymarket /leaderboard está indisponível.
+  # Operador cura top whales em polymarket.com/leaderboard e cola 0x...
+  manual_whitelist: []
+
 # === Tracker ===
 tracker:
   enabled: true

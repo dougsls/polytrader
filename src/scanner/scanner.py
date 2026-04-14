@@ -15,12 +15,14 @@ identidade do objeto.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from src.api.data_client import DataAPIClient
 from src.core.config import ScannerConfig
 from src.core.logger import get_logger
 from src.core.state import InMemoryState
 from src.scanner.leaderboard import fetch_candidates
+from src.scanner.profiler import WalletProfile
 from src.scanner.wallet_pool import WalletPool
 from src.tracker.whale_inventory import snapshot_whale
 
@@ -46,6 +48,25 @@ class Scanner:
         self._state = state
         self._stop = asyncio.Event()
 
+    def _profiles_from_whitelist(self) -> list[WalletProfile]:
+        """Gera WalletProfile sintéticos de endereços manuais.
+
+        Usado quando o leaderboard da Polymarket Data API está indisponível
+        (ex: endpoint removido em 2026). Scores são constantes 1.0 — não
+        passam pelos gates do scorer. O pool trata como top ranqueado.
+        """
+        now = datetime.now(timezone.utc)
+        return [
+            WalletProfile(
+                address=addr, name=None,
+                pnl_usd=10_000.0, volume_usd=50_000.0,
+                win_rate=0.70, total_trades=50, distinct_markets=10,
+                short_term_trade_ratio=0.80,
+                last_trade_at=now - timedelta(hours=1),
+            )
+            for addr in self._cfg.manual_whitelist
+        ]
+
     async def tick(self) -> None:
         """Um ciclo de scan — útil pra chamar no startup + no loop."""
         try:
@@ -56,7 +77,15 @@ class Scanner:
             )
         except Exception as exc:  # noqa: BLE001
             log.error("scanner_fetch_failed", err=repr(exc))
-            return
+            profiles = []
+
+        # Fallback — merge whitelist manual quando leaderboard vazia/falha.
+        if not profiles and self._cfg.manual_whitelist:
+            log.info(
+                "scanner_using_manual_whitelist",
+                count=len(self._cfg.manual_whitelist),
+            )
+            profiles = self._profiles_from_whitelist()
 
         ranked = self._pool.rank(profiles)
 

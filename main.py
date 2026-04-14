@@ -119,10 +119,13 @@ async def amain() -> None:
             msg="require_auth=true mas DASHBOARD_SECRET vazio. Configure .env.",
         )
         sys.exit(1)
+    # Captura o event loop realmente em uso (não um new_event_loop artificial).
+    _running_loop = asyncio.get_running_loop()
     log.info(
         "startup",
         mode=settings.config.executor.mode,
         vps=f"{settings.env.vps_provider}-{settings.env.vps_location}",
+        event_loop=f"{type(_running_loop).__module__}.{type(_running_loop).__name__}",
     )
 
     await init_database()

@@ -104,6 +104,10 @@ class ScannerConfig(_StrictModel):
     wash_trading_filter: WashTradingFilter
     min_short_term_trade_ratio: float = Field(ge=0.0, le=1.0)
     short_term_threshold_hours: int = Field(ge=1)
+    # Fallback de whitelist manual — usado quando a Polymarket API de
+    # leaderboard não estiver disponível (ex: endpoint removido). Lista
+    # de endereços Ethereum (0x...) que o bot rastreia direto.
+    manual_whitelist: list[str] = Field(default_factory=list)
 
     @field_validator("scoring_weights")
     @classmethod
