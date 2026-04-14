@@ -56,6 +56,7 @@ class EnvSettings(BaseSettings):
     dashboard_port: int = Field(default=8080, alias="DASHBOARD_PORT")
     dashboard_host: str = Field(default="0.0.0.0", alias="DASHBOARD_HOST")
     dashboard_secret: str = Field(default="", alias="DASHBOARD_SECRET")
+    dashboard_user: str = Field(default="operator", alias="DASHBOARD_USER")
 
     # Latency
     latency_alert_threshold_ms: int = Field(default=200, alias="LATENCY_ALERT_THRESHOLD_MS")

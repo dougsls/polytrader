@@ -362,6 +362,7 @@ async def amain() -> None:
     # Dashboard FastAPI — sobe em task separada com uvicorn.Server
     dashboard_app = build_dashboard(
         secret=settings.env.dashboard_secret,
+        dashboard_user=settings.env.dashboard_user,
         state=state, balance_cache=balance_cache, shared_conn=shared_conn,
         started_at=started_at, mode=settings.config.executor.mode,
         vps_location=settings.env.vps_location,

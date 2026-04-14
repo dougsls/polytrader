@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PolyTrader Dashboard</title>
+<style>
+  :root {
+    --bg: #0b1020; --panel: #121a33; --panel2: #1a2344;
+    --border: #2a3558; --text: #e7ecf6; --muted: #8a96b4;
+    --green: #26d07c; --red: #ff5c7c; --yellow: #ffcb47; --blue: #4ea3ff;
+    --font: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+  }
+  header {
+    background: linear-gradient(180deg, #0f1831 0%, #0b1020 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px; display: flex; justify-content: space-between; align-items: center;
+  }
+  h1 { margin: 0; font-size: 18px; letter-spacing: 0.5px; }
+  h1 .live { color: var(--green); }
+  .badges { display: flex; gap: 8px; }
+  .badge {
+    font-family: var(--font); font-size: 12px; padding: 4px 10px;
+    border: 1px solid var(--border); border-radius: 999px; background: var(--panel);
+  }
+  .badge.mode-paper { color: var(--yellow); border-color: #6a5312; }
+  .badge.mode-live { color: var(--red); border-color: #6a1220; }
+  .badge.mode-dry-run { color: var(--muted); }
+  .badge.halted { background: #4a0f1f; color: var(--red); border-color: var(--red); }
+  .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+  .grid { display: grid; gap: 16px; }
+  .grid.cards { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+  .grid.cols-2 { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 900px) { .grid.cols-2 { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card h3 {
+    margin: 0 0 6px; font-size: 11px; text-transform: uppercase;
+    letter-spacing: 1px; color: var(--muted); font-weight: 600;
+  }
+  .card .value {
+    font-family: var(--font); font-size: 22px; font-weight: 600;
+  }
+  .card .sub { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .positive { color: var(--green); }
+  .negative { color: var(--red); }
+  .neutral { color: var(--muted); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; margin-top: 16px;
+  }
+  .panel h2 {
+    margin: 0; padding: 12px 16px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: 1px; border-bottom: 1px solid var(--border); color: var(--muted);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .panel .count { color: var(--blue); font-family: var(--font); font-size: 11px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+  th {
+    background: var(--panel2); color: var(--muted); font-weight: 600;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: rgba(78, 163, 255, 0.05); }
+  .mono { font-family: var(--font); font-size: 12px; }
+  .truncate { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-family: var(--font); font-weight: 600;
+  }
+  .pill.buy { background: rgba(38, 208, 124, 0.15); color: var(--green); }
+  .pill.sell { background: rgba(255, 92, 124, 0.15); color: var(--red); }
+  .pill.pending { background: rgba(255, 203, 71, 0.15); color: var(--yellow); }
+  .pill.executed { background: rgba(38, 208, 124, 0.15); color: var(--green); }
+  .pill.skipped { background: rgba(138, 150, 180, 0.15); color: var(--muted); }
+  .pill.failed { background: rgba(255, 92, 124, 0.15); color: var(--red); }
+  .pill.filled { background: rgba(38, 208, 124, 0.15); color: var(--green); }
+  .empty { padding: 24px 16px; text-align: center; color: var(--muted); font-size: 13px; }
+  .toolbar { display: flex; gap: 8px; align-items: center; }
+  button {
+    font-family: var(--font); font-size: 12px; padding: 6px 14px;
+    background: var(--panel2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+  }
+  button:hover { background: #25305a; }
+  button.danger { border-color: var(--red); color: var(--red); }
+  button.success { border-color: var(--green); color: var(--green); }
+  .footer { text-align: center; margin: 24px 0 12px; font-size: 11px; color: var(--muted); }
+  .blink { animation: blink 1.2s ease-in-out infinite; }
+  @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>🔹 PolyTrader <span class="live blink">●</span> LIVE</h1>
+  <div class="badges">
+    <span class="badge" id="badge-mode">mode: —</span>
+    <span class="badge" id="badge-location">vps: —</span>
+    <span class="badge" id="badge-uptime">up: —</span>
+    <span class="badge" id="badge-halt" style="display:none;">HALTED</span>
+  </div>
+</header>
+
+<div class="container">
+  <div class="grid cards">
+    <div class="card"><h3>USDC Balance</h3><div class="value mono" id="bal">—</div><div class="sub" id="bal-sub"></div></div>
+    <div class="card"><h3>PnL Realized 24h</h3><div class="value mono" id="pnl24">—</div><div class="sub">últimas 24h (closed)</div></div>
+    <div class="card"><h3>Unrealized PnL</h3><div class="value mono" id="pnlu">—</div><div class="sub">posições abertas</div></div>
+    <div class="card"><h3>Open Positions</h3><div class="value mono" id="open-pos">—</div><div class="sub" id="open-sub"></div></div>
+    <div class="card"><h3>Active Whales</h3><div class="value mono" id="whales">—</div><div class="sub" id="whales-sub"></div></div>
+    <div class="card"><h3>Signals 24h</h3><div class="value mono" id="sig-total">—</div><div class="sub" id="sig-sub"></div></div>
+  </div>
+
+  <div class="panel">
+    <h2>
+      <span>🐋 Tracked Whales</span>
+      <span class="count" id="wallets-count">—</span>
+    </h2>
+    <div id="wallets-table"></div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="panel">
+      <h2>
+        <span>📡 Recent Signals</span>
+        <span class="count" id="signals-count">—</span>
+      </h2>
+      <div id="signals-table"></div>
+    </div>
+
+    <div class="panel">
+      <h2>
+        <span>💱 Copy Trades</span>
+        <span class="count" id="trades-count">—</span>
+      </h2>
+      <div id="trades-table"></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>
+      <span>📊 Bot Positions (Open)</span>
+      <span class="count" id="positions-count">—</span>
+    </h2>
+    <div id="positions-table"></div>
+  </div>
+
+  <div class="panel">
+    <h2>
+      <span>⚙️ Governance</span>
+      <span class="count" id="halt-status">—</span>
+    </h2>
+    <div style="padding: 14px 16px;" class="toolbar">
+      <button class="danger" onclick="callHalt()">🛑 HALT trading</button>
+      <button class="success" onclick="callResume()">▶ RESUME</button>
+      <span class="sub mono" id="halt-reason" style="color:var(--muted);"></span>
+    </div>
+  </div>
+
+  <div class="footer">auto-refresh 5s · polytrader dashboard</div>
+</div>
+
+<script>
+const fmt = {
+  usd: v => (v == null ? '—' : `$${Number(v).toFixed(2)}`),
+  pct: v => (v == null ? '—' : `${(Number(v) * 100).toFixed(1)}%`),
+  int: v => (v == null ? '—' : Number(v).toLocaleString()),
+  addr: a => a ? a.slice(0, 10) + '…' + a.slice(-4) : '—',
+  time: s => s ? new Date(s).toLocaleTimeString('pt-BR') : '—',
+  pnlClass: v => v == null ? 'neutral' : (v > 0 ? 'positive' : (v < 0 ? 'negative' : 'neutral')),
+  pnlPrefix: v => v == null ? '' : (v > 0 ? '+' : ''),
+  uptime: s => {
+    if (!s) return '—';
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+    return h > 0 ? `${h}h${String(m).padStart(2,'0')}` : `${m}m`;
+  },
+};
+
+async function j(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(r.status + ' ' + url);
+  return r.json();
+}
+
+async function refresh() {
+  try {
+    const [ov, wallets, signals, positions, trades] = await Promise.all([
+      j('/api/overview'),
+      j('/api/wallets'),
+      j('/api/signals?limit=30'),
+      j('/api/positions'),
+      j('/api/trades?limit=30'),
+    ]);
+
+    // Header badges
+    const modeBadge = document.getElementById('badge-mode');
+    modeBadge.textContent = `mode: ${ov.mode}`;
+    modeBadge.className = `badge mode-${ov.mode}`;
+    document.getElementById('badge-location').textContent = `vps: ${ov.vps_location}`;
+    document.getElementById('badge-uptime').textContent = `up: ${fmt.uptime(ov.uptime_seconds)}`;
+    const haltBadge = document.getElementById('badge-halt');
+    haltBadge.style.display = ov.halted ? '' : 'none';
+    document.getElementById('halt-status').textContent = ov.halted ? 'HALTED' : 'running';
+    document.getElementById('halt-reason').textContent = ov.halt_reason ? `reason: ${ov.halt_reason}` : '';
+
+    // Cards
+    document.getElementById('bal').textContent = fmt.usd(ov.balance_usdc);
+    document.getElementById('bal-sub').textContent = ov.balance_fresh ? 'fresh' : '⚠ stale';
+    document.getElementById('bal-sub').className = 'sub ' + (ov.balance_fresh ? 'positive' : 'negative');
+
+    const r24 = ov.pnl.realized_24h;
+    const el24 = document.getElementById('pnl24');
+    el24.textContent = fmt.pnlPrefix(r24) + fmt.usd(r24);
+    el24.className = 'value mono ' + fmt.pnlClass(r24);
+
+    const pu = ov.pnl.unrealized;
+    const elU = document.getElementById('pnlu');
+    elU.textContent = fmt.pnlPrefix(pu) + fmt.usd(pu);
+    elU.className = 'value mono ' + fmt.pnlClass(pu);
+
+    document.getElementById('open-pos').textContent = ov.open_positions;
+    document.getElementById('open-sub').textContent = `${ov.whale_inventory_entries} whale pos cached`;
+
+    document.getElementById('whales').textContent = ov.active_whales;
+    document.getElementById('whales-sub').textContent = 'static whitelist';
+
+    const sc = ov.signals_24h || {};
+    const sigTotal = (sc.executed||0) + (sc.skipped||0) + (sc.pending||0) + (sc.failed||0);
+    document.getElementById('sig-total').textContent = sigTotal;
+    document.getElementById('sig-sub').textContent =
+      `exec:${sc.executed||0} skip:${sc.skipped||0} fail:${sc.failed||0}`;
+
+    // Wallets table
+    renderWallets(wallets);
+    document.getElementById('wallets-count').textContent = `${wallets.filter(w=>w.is_active).length} active`;
+
+    // Signals table
+    renderSignals(signals);
+    document.getElementById('signals-count').textContent = `${signals.length} recent`;
+
+    // Trades table
+    renderTrades(trades);
+    document.getElementById('trades-count').textContent = `${trades.length} recent`;
+
+    // Positions
+    renderPositions(positions);
+    document.getElementById('positions-count').textContent = `${positions.open_count} open`;
+
+  } catch (e) {
+    console.error('refresh failed', e);
+  }
+}
+
+function renderWallets(rows) {
+  const el = document.getElementById('wallets-table');
+  if (!rows.length) { el.innerHTML = '<div class="empty">Nenhuma carteira rastreada.</div>'; return; }
+  let html = '<table><thead><tr><th>Name</th><th>Address</th><th>Score</th><th>PnL USD</th><th>Win Rate</th><th>Trades</th><th>Status</th></tr></thead><tbody>';
+  for (const w of rows) {
+    html += `<tr>
+      <td>${w.name || '<span class="neutral">—</span>'}</td>
+      <td class="mono">${fmt.addr(w.address)}</td>
+      <td class="mono">${(w.score || 0).toFixed(2)}</td>
+      <td class="mono ${fmt.pnlClass(w.pnl_usd)}">${fmt.usd(w.pnl_usd)}</td>
+      <td class="mono">${fmt.pct(w.win_rate)}</td>
+      <td class="mono">${fmt.int(w.total_trades)}</td>
+      <td><span class="pill ${w.is_active?'executed':'skipped'}">${w.is_active?'active':'inactive'}</span></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function renderSignals(rows) {
+  const el = document.getElementById('signals-table');
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">Aguardando sinais do RTDS…<br/><span class="mono" style="color:var(--muted);font-size:11px;">Sinais aparecem quando uma das 20 whales negocia em mercado &lt;48h.</span></div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Time</th><th>Side</th><th>Market</th><th>Price</th><th>USD</th><th>TTL</th><th>Status</th></tr></thead><tbody>';
+  for (const s of rows) {
+    const ttl = s.hours_to_resolution != null ? `${s.hours_to_resolution.toFixed(1)}h` : '—';
+    const title = (s.market_title || '—').slice(0, 50);
+    html += `<tr>
+      <td class="mono">${fmt.time(s.detected_at)}</td>
+      <td><span class="pill ${s.side.toLowerCase()}">${s.side}</span></td>
+      <td class="truncate" title="${(s.market_title||'').replace(/"/g,'&quot;')}">${title}</td>
+      <td class="mono">${s.price ? s.price.toFixed(3) : '—'}</td>
+      <td class="mono">${fmt.usd(s.usd_value)}</td>
+      <td class="mono">${ttl}</td>
+      <td>
+        <span class="pill ${s.status}">${s.status}</span>
+        ${s.skip_reason ? `<div class="mono neutral" style="font-size:10px;margin-top:2px;">${s.skip_reason.slice(0,40)}</div>` : ''}
+      </td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function renderTrades(rows) {
+  const el = document.getElementById('trades-table');
+  if (!rows.length) {
+    el.innerHTML = '<div class="empty">Nenhum copy trade ainda.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Time</th><th>Side</th><th>Market</th><th>Size</th><th>Price</th><th>Slip</th><th>Status</th></tr></thead><tbody>';
+  for (const t of rows) {
+    const size = t.executed_size ?? t.intended_size;
+    const price = t.executed_price ?? t.intended_price;
+    const slip = t.slippage != null ? (t.slippage * 100).toFixed(2) + '%' : '—';
+    const title = (t.market_title || t.condition_id || '—').slice(0, 50);
+    html += `<tr>
+      <td class="mono">${fmt.time(t.created_at)}</td>
+      <td><span class="pill ${t.side.toLowerCase()}">${t.side}</span></td>
+      <td class="truncate" title="${(t.market_title||'').replace(/"/g,'&quot;')}">${title}</td>
+      <td class="mono">${size ? size.toFixed(2) : '—'}</td>
+      <td class="mono">${price ? price.toFixed(3) : '—'}</td>
+      <td class="mono">${slip}</td>
+      <td><span class="pill ${t.status}">${t.status}</span></td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function renderPositions(data) {
+  const el = document.getElementById('positions-table');
+  if (!data.positions.length) {
+    el.innerHTML = '<div class="empty">Nenhuma posição aberta.</div>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Market</th><th>Outcome</th><th>Size</th><th>Entry</th><th>Current</th><th>Unrealized PnL</th><th>Opened</th></tr></thead><tbody>';
+  for (const p of data.positions) {
+    const pnlCls = fmt.pnlClass(p.unrealized_pnl);
+    const title = (p.market_title || '—').slice(0, 55);
+    html += `<tr>
+      <td class="truncate" title="${(p.market_title||'').replace(/"/g,'&quot;')}">${title}</td>
+      <td>${p.outcome || '—'}</td>
+      <td class="mono">${p.size ? p.size.toFixed(2) : '—'}</td>
+      <td class="mono">${p.avg_entry_price ? p.avg_entry_price.toFixed(3) : '—'}</td>
+      <td class="mono">${p.current_price ? p.current_price.toFixed(3) : '—'}</td>
+      <td class="mono ${pnlCls}">${fmt.pnlPrefix(p.unrealized_pnl)}${fmt.usd(p.unrealized_pnl)}</td>
+      <td class="mono">${fmt.time(p.opened_at)}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+async function callHalt() {
+  if (!confirm('Trava global? Nenhuma ordem nova será enviada até RESUME.')) return;
+  try { await fetch('/halt?reason=dashboard', {method:'POST'}); refresh(); }
+  catch (e) { alert('falhou: ' + e); }
+}
+async function callResume() {
+  try { await fetch('/resume', {method:'POST'}); refresh(); }
+  catch (e) { alert('falhou: ' + e); }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
