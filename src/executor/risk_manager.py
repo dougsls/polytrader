@@ -32,11 +32,15 @@ class RiskDecision:
     sized_usd: float  # tamanho em USD aprovado
 
 
+CONSECUTIVE_POST_FAILS_THRESHOLD = 4
+
+
 class RiskManager:
     def __init__(self, cfg: ExecutorConfig) -> None:
         self._cfg = cfg
         self._halted = False
         self._halt_reason: str | None = None
+        self._consecutive_post_fails = 0
 
     # -- Halt global --------------------------------------------------------
 
@@ -48,10 +52,33 @@ class RiskManager:
     def resume(self) -> None:
         self._halted = False
         self._halt_reason = None
+        self._consecutive_post_fails = 0
 
     @property
     def is_halted(self) -> bool:
         return self._halted
+
+    @property
+    def halt_reason(self) -> str | None:
+        return self._halt_reason
+
+    # -- Circuit breaker: falhas consecutivas de post_order ---------------
+
+    def record_post_fail(self) -> bool:
+        """Incrementa contador. Retorna True se acabou de tripar o breaker."""
+        self._consecutive_post_fails += 1
+        if self._consecutive_post_fails >= CONSECUTIVE_POST_FAILS_THRESHOLD:
+            reason = (
+                f"Consecutive post fails: {self._consecutive_post_fails} "
+                f">= {CONSECUTIVE_POST_FAILS_THRESHOLD}"
+            )
+            self.halt(reason)
+            return True
+        return False
+
+    def record_post_success(self) -> None:
+        """Reset do contador quando uma ordem é postada com sucesso."""
+        self._consecutive_post_fails = 0
 
     # -- Sizing -------------------------------------------------------------
 

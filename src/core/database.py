@@ -67,4 +67,7 @@ async def get_connection(db_path: Path = DEFAULT_DB_PATH) -> AsyncIterator[aiosq
     async with aiosqlite.connect(db_path) as conn:
         conn.row_factory = aiosqlite.Row
         await conn.execute("PRAGMA foreign_keys=ON;")
+        # wal_autocheckpoint é por-conexão. Aplicado em todo writer evita
+        # que .db-wal inche entre checkpoints longos do init.
+        await conn.execute("PRAGMA wal_autocheckpoint=500;")
         yield conn

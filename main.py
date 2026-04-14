@@ -8,9 +8,11 @@ from __future__ import annotations
 import asyncio
 import signal
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 import aiosqlite
+import uvicorn
 
 from src.api.auth import prefetch_credentials
 from src.api.balance import USDCBalanceFetcher
@@ -25,11 +27,13 @@ from src.core.database import DEFAULT_DB_PATH, init_database
 from src.core.logger import configure_logging, get_logger
 from src.core.models import CopyTrade, TradeSignal
 from src.core.state import InMemoryState
+from src.dashboard.app import build_app as build_dashboard
 from src.executor.balance_cache import BalanceCache
 from src.executor.copy_engine import CopyEngine
 from src.executor.position_sync import reconcile_bot_positions
 from src.executor.risk_manager import RiskManager
 from src.executor.risk_state import build_risk_state
+from src.notifier.daily_summary import daily_summary_loop
 from src.notifier.telegram import TelegramNotifier
 from src.scanner.scanner import Scanner
 from src.scanner.wallet_pool import WalletPool
@@ -99,6 +103,7 @@ async def heartbeat_loop(shutdown: asyncio.Event) -> None:
 async def amain() -> None:
     settings = get_settings()
     configure_logging(settings.env.log_level)
+    started_at = datetime.now(timezone.utc)
     log.info(
         "startup",
         mode=settings.config.executor.mode,
@@ -331,6 +336,33 @@ async def amain() -> None:
         except (ValueError, OSError):
             pass
 
+    # Dashboard FastAPI — sobe em task separada com uvicorn.Server
+    dashboard_app = build_dashboard(
+        secret=settings.env.dashboard_secret,
+        state=state, balance_cache=balance_cache, shared_conn=shared_conn,
+        started_at=started_at, mode=settings.config.executor.mode,
+        vps_location=settings.env.vps_location,
+    )
+    uv_config = uvicorn.Config(
+        dashboard_app,
+        host=settings.config.dashboard.host,
+        port=settings.config.dashboard.port,
+        log_level="warning", access_log=False, lifespan="off",
+    )
+    dashboard_server = uvicorn.Server(uv_config)
+
+    # Notifier de circuit-breaker — CopyEngine emite `risk_halt` via on_event
+    original_on_event = on_event
+
+    async def on_event_with_halt(kind: str, sig: TradeSignal, tr: CopyTrade | None) -> None:
+        if kind == "risk_halt":
+            notifier.notify(
+                f"🚨 CIRCUIT BREAKER: {risk.halt_reason}. Trading congelado."
+            )
+        await original_on_event(kind, sig, tr)
+
+    engine._on_event = on_event_with_halt  # re-wire após build
+
     tasks = [
         asyncio.create_task(heartbeat_loop(shutdown), name="heartbeat"),
         asyncio.create_task(scanner.run_loop(), name="scanner"),
@@ -348,6 +380,17 @@ async def amain() -> None:
             ),
             name="latency-monitor",
         ),
+        asyncio.create_task(dashboard_server.serve(), name="dashboard"),
+        asyncio.create_task(
+            daily_summary_loop(
+                shutdown=shutdown,
+                hour_utc=settings.config.notifier.daily_summary_hour,
+                conn=shared_conn, balance_cache=balance_cache,
+                notifier=notifier, started_at=started_at,
+                mode=settings.config.executor.mode,
+            ),
+            name="daily-summary",
+        ),
     ]
 
     notifier.notify(
@@ -361,6 +404,7 @@ async def amain() -> None:
     await rtds.close()
     await scanner.stop()
     await balance_cache.stop()
+    dashboard_server.should_exit = True
     for t in tasks:
         t.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)

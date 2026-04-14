@@ -127,12 +127,18 @@ class CopyEngine:
         if self._cfg.mode == "live":
             try:
                 await self._clob.post_order(draft, order_type=self._cfg.default_order_type)
+                self._risk.record_post_success()
             except NotImplementedError:
                 log.error("live_mode_not_wired", signal_id=signal.id)
                 await self._mark_skipped(signal, "LIVE_NOT_WIRED")
                 return
             except PolymarketAPIError as exc:
-                await self._mark_skipped(signal, f"POST_FAIL: {exc}")
+                # Circuit breaker — N falhas consecutivas → halt global.
+                tripped = self._risk.record_post_fail()
+                skip_reason = f"POST_FAIL: {exc}"
+                if tripped and self._on_event:
+                    await self._on_event("risk_halt", signal, None)
+                await self._mark_skipped(signal, skip_reason)
                 return
         elif self._cfg.mode == "dry-run":
             log.info("dry_run_skip_post", trade_id=trade.id)
