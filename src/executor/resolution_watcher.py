@@ -52,30 +52,21 @@ async def _local_resolve_if_extreme(
     conn: aiosqlite.Connection, position_id: int, condition_id: str,
     outcome: str, size: float, avg_entry: float,
 ) -> str | None:
-    """Fallback: usa DB local (current_price do price_updater + end_date do cache)
-    pra inferir resolução quando Gamma não expõe mais o mercado."""
-    from datetime import datetime, timezone
+    """Fallback: usa DB local (current_price do price_updater) pra inferir
+    resolução. Polymarket CLOB para de negociar quando outcome é decidido —
+    preço em extremo (≥0.99 ou ≤0.01) é indicador confiável de resolução.
+    NÃO dependemos de endDate pois jogos como CS Map 1 resolvem muito antes
+    do 'match endDate' declarado no Polymarket."""
     async with conn.execute(
-        "SELECT bp.current_price, m.end_date FROM bot_positions bp "
-        "LEFT JOIN market_metadata_cache m ON m.condition_id = bp.condition_id "
-        "WHERE bp.id=?", (position_id,),
+        "SELECT current_price FROM bot_positions WHERE id=?", (position_id,),
     ) as cur:
         row = await cur.fetchone()
     if not row:
         return None
     cur_price = float(row[0]) if row[0] else 0.0
-    end_iso = row[1]
-    if not end_iso:
-        return None
-    try:
-        end_dt = datetime.fromisoformat(end_iso.replace("Z", "+00:00"))
-        if end_dt.tzinfo is None:
-            end_dt = end_dt.replace(tzinfo=timezone.utc)
-    except Exception:
-        return None
-    end_passed_min = (datetime.now(timezone.utc) - end_dt).total_seconds() / 60.0
-    if end_passed_min < 2.0:
-        return None
+    # Extremos: ≥0.99 (outcome ganhou) ou ≤0.01 (outcome perdeu).
+    # Durante um jogo ao vivo, preço raramente toca esses níveis sem que o
+    # outcome esteja de fato decidido (book seca, CLOB para).
     if not (cur_price >= 0.99 or cur_price <= 0.01):
         return None
     # Inferido: preço em extremo + endDate passou
@@ -91,7 +82,7 @@ async def _local_resolve_if_extreme(
     )
     log.info("position_resolved_local_fallback",
              cid=condition_id[:12], outcome=outcome, cur_price=cur_price,
-             resolution_price=resolution_price, end_passed_min=end_passed_min,
+             resolution_price=resolution_price,
              realized_pnl=realized_pnl, won=won)
     return "won" if won else "lost"
 
