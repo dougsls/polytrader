@@ -150,6 +150,60 @@ class GammaAPIClient:
             )
             await db.commit()
 
+    async def list_active_markets(
+        self,
+        *,
+        limit: int = 200,
+        offset: int = 0,
+        max_hours_to_resolution: float | None = None,
+        min_minutes_to_resolution: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Lista mercados ativos paginados, normalizando tokens para shape CLOB.
+
+        Filtra no cliente:
+          - active=True, closed=False, archived=False
+          - end_date dentro de janela [min_minutes, max_hours]
+        Usado pelo arbitrage scanner para varrer book de YES/NO em massa.
+
+        Não-cacheado: o status (active/closed/end_date) muda dinamicamente
+        e não pode confiar no cache de TTL=300s do market_metadata_cache.
+        """
+        params: dict[str, Any] = {
+            "limit": limit,
+            "offset": offset,
+            "active": "true",
+            "closed": "false",
+            "archived": "false",
+        }
+        data = await self._get("/markets", params=params)
+        if not isinstance(data, list):
+            return []
+        now = datetime.now(timezone.utc)
+        out: list[dict[str, Any]] = []
+        for m in data:
+            m["tokens"] = self._normalize_tokens(m)
+            if not m["tokens"] or len(m["tokens"]) < 2:
+                continue
+            end_iso = m.get("end_date_iso") or m.get("endDate") or m.get("end_date")
+            hours = None
+            if end_iso:
+                try:
+                    end_dt = datetime.fromisoformat(str(end_iso).replace("Z", "+00:00"))
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=timezone.utc)
+                    hours = (end_dt - now).total_seconds() / 3600.0
+                except ValueError:
+                    hours = None
+            m["_hours_to_resolution"] = hours
+            if max_hours_to_resolution is not None and hours is not None:
+                if hours > max_hours_to_resolution:
+                    continue
+            if min_minutes_to_resolution is not None and hours is not None:
+                if hours * 60 < min_minutes_to_resolution:
+                    continue
+            out.append(m)
+        return out
+
     async def get_market(self, condition_id: str, *, force_refresh: bool = False) -> dict[str, Any]:
         if not force_refresh:
             cached = await self._read_cache(condition_id)

@@ -84,6 +84,43 @@ class CLOBClient:
     async def book(self, token_id: str) -> dict[str, Any]:
         return await self._get("/book", params={"token_id": token_id})
 
+    async def maker_price(
+        self,
+        token_id: str,
+        side: str,
+        tick_size: float,
+        offset_ticks: int = 1,
+    ) -> float:
+        """Calcula um preço MAKER (não-crossing) a partir do book.
+
+        BUY: pega best_bid e SOBE em N ticks (mas nunca >= best_ask).
+        SELL: pega best_ask e DESCE em N ticks (mas nunca <= best_bid).
+
+        Retorna 0.0 se book vazio. Caller deve tratar como "não-tradeável".
+        Track B: usado pelo executor pra postar GTC dentro do spread sem
+        cruzar — captura o spread em vez de pagar taker.
+        """
+        try:
+            book = await self.book(token_id)
+        except PolymarketAPIError:
+            return 0.0
+        bids = book.get("bids") or []
+        asks = book.get("asks") or []
+        best_bid = float(bids[0]["price"]) if bids else 0.0
+        best_ask = float(asks[0]["price"]) if asks else 1.0
+        side_u = side.upper()
+        if side_u == "BUY":
+            target = best_bid + offset_ticks * tick_size
+            # Não cruzar — preço maker BUY < best_ask
+            if best_ask > 0 and target >= best_ask:
+                target = max(best_bid, best_ask - tick_size)
+            return round(target / tick_size) * tick_size
+        # SELL
+        target = best_ask - offset_ticks * tick_size
+        if target <= best_bid:
+            target = min(best_ask, best_bid + tick_size)
+        return round(target / tick_size) * tick_size
+
     # ------------------------------------------------------------------ #
     # Autenticado — requer py-clob-client já instanciado                 #
     # ------------------------------------------------------------------ #

@@ -64,6 +64,26 @@ class EnvSettings(BaseSettings):
         default=300, alias="LATENCY_PROBE_INTERVAL_SECONDS"
     )
 
+    # On-chain (CTF arbitrage). Polygon mainnet.
+    polygon_rpc_url: str = Field(
+        default="https://polygon-rpc.com", alias="POLYGON_RPC_URL"
+    )
+    # Polymarket ConditionalTokens (CTF) — Polygon mainnet
+    ctf_contract_address: str = Field(
+        default="0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+        alias="CTF_CONTRACT_ADDRESS",
+    )
+    # USDC.e (bridged USDC, used by Polymarket)
+    usdc_contract_address: str = Field(
+        default="0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+        alias="USDC_CONTRACT_ADDRESS",
+    )
+    # NegRiskCtfExchange / NegRiskAdapter (multi-outcome neg-risk markets)
+    neg_risk_adapter_address: str = Field(
+        default="0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296",
+        alias="NEG_RISK_ADAPTER_ADDRESS",
+    )
+
 
 # ---------- config.yaml ----------
 
@@ -206,6 +226,64 @@ class ExecutorConfig(_StrictModel):
         return v
 
 
+class ArbitrageConfig(_StrictModel):
+    """Track A — pure-arbitrage engine. Independente do copy-trader.
+
+    Edge matemático: se ask_yes + ask_no < 1.0 - fees - safety, comprar
+    ambos e fazer mergePositions no CTF Polygon devolve $1 USDC garantido.
+    """
+
+    enabled: bool = False
+    mode: Literal["live", "paper", "dry-run"] = "paper"
+    # Capital próprio reservado para arb (separado do copy-trader).
+    max_capital_usd: float = Field(gt=0, default=200.0)
+    max_per_op_usd: float = Field(gt=0, default=50.0)
+    # Margem de segurança em cima de fees + slippage estimado.
+    # Edge bruto = 1 - (ask_yes + ask_no). Edge líquido = bruto - fees - safety.
+    # Só executa se edge líquido >= min_edge_pct.
+    min_edge_pct: float = Field(gt=0, le=0.5, default=0.005)  # 0.5% edge mínimo
+    # CLOB taker fee assumido por leg. Live atual: ~0%.
+    # Mantém >0 como safety se fees voltarem.
+    fee_per_leg: float = Field(ge=0, le=0.05, default=0.0)
+    # Slippage adicional reservado contra book andando contra na execução.
+    safety_buffer_pct: float = Field(ge=0, le=0.05, default=0.003)
+    # Profundidade mínima de book em cada side antes de tentar.
+    min_book_depth_usd: float = Field(ge=0, default=20.0)
+    # Janela de scan: mercados que resolvem em mais de N horas são ignorados
+    # (capital travado demais; arb só faz sentido em curto prazo).
+    max_hours_to_resolution: float = Field(gt=0, default=72.0)
+    # Janela de scan: mercados quase resolvendo (< N min) são ignorados
+    # (risco de ordem não fillar antes do close).
+    min_minutes_to_resolution: float = Field(ge=0, default=10.0)
+    # Intervalo entre sweeps (segundos). 30s é razoável; mercados com
+    # YES+NO < 1 raramente desaparecem em <30s.
+    scan_interval_seconds: int = Field(ge=5, default=30)
+    # Categorical (multi-outcome) arb: comprar todos outcomes quando
+    # soma < 1. Desligado por default — exige mais cuidado de execução.
+    enable_multi_outcome: bool = False
+    # Após executar, fazer merge no CTF imediatamente para liberar capital.
+    auto_merge: bool = True
+    # Concurrent limit: max ops simultâneas em flight (proteção contra
+    # mesma whale-event cascateando em N mercados).
+    max_concurrent_ops: int = Field(ge=1, default=3)
+    # Cool-down: tempo (s) entre 2 ops no mesmo condition_id.
+    same_market_cooldown_seconds: int = Field(ge=0, default=60)
+
+
+class DepthSizingConfig(_StrictModel):
+    """Track B — book-depth-aware sizing para o copy-trader.
+
+    Em vez de só validar slippage anchor, lê o livro real e calcula quanto
+    consegue encher antes do mid mover X% — evita pendurar GTC em book raso.
+    """
+
+    enabled: bool = False
+    # % máximo de impacto permitido em cima do mid atual.
+    max_impact_pct: float = Field(ge=0, le=0.5, default=0.02)
+    # Quantos níveis de book consultar.
+    max_levels: int = Field(ge=1, le=20, default=5)
+
+
 class DashboardConfig(_StrictModel):
     enabled: bool
     host: str
@@ -229,6 +307,8 @@ class YamlConfig(_StrictModel):
     executor: ExecutorConfig
     dashboard: DashboardConfig
     notifier: NotifierConfig
+    arbitrage: ArbitrageConfig = Field(default_factory=ArbitrageConfig)
+    depth_sizing: DepthSizingConfig = Field(default_factory=DepthSizingConfig)
 
 
 # ---------- Façade ----------

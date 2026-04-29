@@ -143,6 +143,36 @@ dashboard:
   refresh_interval_seconds: 30
   require_auth: true
 
+# === Arbitrage (Track A) ===
+# Engine de arbitragem pura YES+NO < 1.0. Roda EM PARALELO ao copy-trader,
+# com capital próprio e risk profile separado. Edge é matemático
+# (não depende de whale alpha) — comprar YES+NO por menos de $1 e dar
+# mergePositions no CTF garante recebimento de $1 USDC.
+arbitrage:
+  enabled: false                  # default off; ative só após validar paper
+  mode: "paper"                   # "live", "paper", "dry-run"
+  max_capital_usd: 200            # banca dedicada à arb (separada do copy)
+  max_per_op_usd: 50              # ticket size por oportunidade
+  min_edge_pct: 0.005             # 0.5% edge líquido mínimo após fees+safety
+  fee_per_leg: 0.0                # CLOB hoje cobra 0%; manter como guard
+  safety_buffer_pct: 0.003        # 0.3% reserva contra book moving
+  min_book_depth_usd: 20          # depth mínima por leg pra tentar
+  max_hours_to_resolution: 72     # mercados que resolvem em >72h: ignora
+  min_minutes_to_resolution: 10   # quase fechando: ignora
+  scan_interval_seconds: 30
+  enable_multi_outcome: false     # arb categórica (varios outcomes) — TODO
+  auto_merge: true                # merge no CTF imediatamente após buy ambos
+  max_concurrent_ops: 3
+  same_market_cooldown_seconds: 60
+
+# === Depth Sizing (Track B) ===
+# Sizing book-aware para o copy-trader: lê o livro real e calcula
+# quanto consegue encher antes do mid mover max_impact_pct.
+depth_sizing:
+  enabled: false                  # ative quando quiser que o copy use depth
+  max_impact_pct: 0.02            # 2% impacto máximo aceitável
+  max_levels: 5
+
 # === Notifier ===
 notifier:
   enabled: true

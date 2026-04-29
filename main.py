@@ -23,6 +23,10 @@ from src.api.gamma_client import GammaAPIClient
 from src.api.http import close_http_client, prewarm_connections
 from src.api.startup_checks import check_geoblock, latency_baseline
 from src.api.websocket_client import RTDSClient
+from src.arbitrage.ctf_client import CTFClient
+from src.arbitrage.executor import ArbExecutor
+from src.arbitrage.models import ArbExecution, ArbOpportunity
+from src.arbitrage.scanner import ArbScanner
 from src.core.config import get_settings
 from src.core.database import DEFAULT_DB_PATH, init_database, open_shared_connection
 from src.core.logger import configure_logging, get_logger
@@ -356,6 +360,59 @@ async def amain() -> None:
         on_event=on_event, conn=shared_conn,
     )
 
+    # --- arbitrage engine (Track A) — RODA EM PARALELO ao copy-trader -----
+    # Capital separado (cfg.arbitrage.max_capital_usd), risk profile próprio.
+    # Edge matemático: YES+NO < 1 → mergePositions no CTF devolve $1.
+    arb_queue: asyncio.Queue[ArbOpportunity] = asyncio.Queue(maxsize=200)
+    arb_scanner: ArbScanner | None = None
+    arb_executor: ArbExecutor | None = None
+    if settings.config.arbitrage.enabled:
+        # CTF client só é necessário se mode=live + auto_merge.
+        ctf: CTFClient | None = None
+        if (
+            settings.config.arbitrage.mode == "live"
+            and settings.config.arbitrage.auto_merge
+        ):
+            if not settings.env.private_key:
+                log.critical("arb_live_requires_private_key")
+                notifier.notify("🚨 Arb LIVE pediu PRIVATE_KEY mas .env vazio.")
+                sys.exit(1)
+            ctf = CTFClient(
+                rpc_url=settings.env.polygon_rpc_url,
+                ctf_address=settings.env.ctf_contract_address,
+                usdc_address=settings.env.usdc_contract_address,
+                private_key=settings.env.private_key,
+                funder_address=settings.env.funder_address or None,
+            )
+        arb_scanner = ArbScanner(
+            cfg=settings.config.arbitrage, gamma=gamma, clob=clob,
+            queue=arb_queue, conn=shared_conn,
+        )
+
+        async def on_arb_event(
+            kind: str, op: ArbOpportunity, ex: ArbExecution | None,
+        ) -> None:
+            if kind == "arb_executed" and ex is not None:
+                emoji = "💎" if ex.status == "completed" else "⚠️"
+                pnl = ex.realized_pnl_usd if ex.realized_pnl_usd is not None else 0.0
+                notifier.notify(
+                    f"{emoji} ARB {ex.status.upper()} | edge_net={op.edge_net_pct:.4f} "
+                    f"| pnl={pnl:+.4f} USDC | {(op.market_title or '')[:50]}"
+                )
+
+        arb_executor = ArbExecutor(
+            cfg=settings.config.arbitrage, clob=clob, gamma=gamma, ctf=ctf,
+            queue=arb_queue, conn=shared_conn, on_event=on_arb_event,
+        )
+        log.info(
+            "arb_engine_wired",
+            mode=settings.config.arbitrage.mode,
+            capital=settings.config.arbitrage.max_capital_usd,
+            min_edge=settings.config.arbitrage.min_edge_pct,
+        )
+    else:
+        log.info("arb_engine_disabled")
+
     # --- graceful shutdown ------------------------------------------------
     shutdown = asyncio.Event()
 
@@ -444,6 +501,15 @@ async def amain() -> None:
             name="daily-summary",
         ),
     ]
+
+    # Track A — arb tasks (apenas se cfg.arbitrage.enabled).
+    if arb_scanner is not None and arb_executor is not None:
+        tasks.append(asyncio.create_task(
+            arb_scanner.run_loop(shutdown), name="arb-scanner",
+        ))
+        tasks.append(asyncio.create_task(
+            arb_executor.run_loop(shutdown), name="arb-executor",
+        ))
 
     notifier.notify(
         f"🟢 PolyTrader online | mode={settings.config.executor.mode} "
