@@ -220,9 +220,12 @@ async def amain() -> None:
                 funder=settings.env.funder_address,
                 signature_type=settings.env.signature_type,
             )
+            # HFT — passa L2Credentials ao CLOBClient pra post_order
+            # construir HMAC headers inline (sem run_in_executor).
             clob = CLOBClient(
                 signed_client=signed.standard,
                 neg_risk_signed_client=signed.neg_risk,
+                credentials=signed.credentials,
             )
         except Exception as exc:  # noqa: BLE001
             notifier.notify(f"🚨 EOA auth prefetch falhou: {exc!r}")

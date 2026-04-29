@@ -17,19 +17,47 @@ from src.executor.order_watchdog import _is_terminal
 from src.executor.stale_cleanup import _find_stale, _synthetic_sell_signal
 
 
-# ---------- C1 — post_order response validation ----------
+# ---------- C1 — post_order response validation (HFT async path) ----------
+# Após refactor HFT: post_order é 100% async via httpx; validamos via
+# mock do httpx.AsyncClient. signing CPU continua via SDK (signer.create_order).
 
-async def test_post_order_raises_on_success_false():
+async def _build_clob_for_test(http_response_json: dict, status_code: int = 200):
+    """Helper: monta CLOBClient com signer mockado + http client mockado."""
+    from unittest.mock import AsyncMock, patch
     from src.api.clob_client import CLOBClient
+    from src.api.auth import L2Credentials
 
     signer = MagicMock()
-    signer.create_order = MagicMock(return_value={})
-    # Polymarket rejected — success=False + errorMsg
-    signer.post_order = MagicMock(return_value={
+    # SDK retorna SignedOrder dataclass; aqui basta um MagicMock com .dict()
+    signed_order = MagicMock()
+    signed_order.dict = MagicMock(return_value={"order": "fake"})
+    signer.create_order = MagicMock(return_value=signed_order)
+
+    creds = L2Credentials(
+        api_key="key", secret="YWJjZGVmZ2hpag==",
+        passphrase="pass", address="0xabc",
+    )
+    clob = CLOBClient(signed_client=signer, credentials=creds)
+
+    # Mock httpx response
+    mock_response = MagicMock()
+    mock_response.status_code = status_code
+    mock_response.headers = {}
+    mock_response.text = orjson.dumps(http_response_json).decode()
+    mock_response.content = orjson.dumps(http_response_json)
+    mock_response.raise_for_status = MagicMock()
+
+    mock_http_client = AsyncMock()
+    mock_http_client.post = AsyncMock(return_value=mock_response)
+
+    patcher = patch("src.api.clob_client.get_http_client", AsyncMock(return_value=mock_http_client))
+    return clob, signer, patcher
+
+
+async def test_post_order_raises_on_success_false():
+    clob, signer, patcher = await _build_clob_for_test({
         "success": False, "errorMsg": "insufficient allowance", "orderID": "",
     })
-    clob = CLOBClient(signed_client=signer)
-
     draft = MagicMock()
     draft.neg_risk = False
     draft.tick_size = "0.01"
@@ -38,21 +66,16 @@ async def test_post_order_raises_on_success_false():
     draft.size = 10.0
     draft.side = "BUY"
 
-    with pytest.raises(PolymarketAPIError) as exc:
-        await clob.post_order(draft)
+    with patcher:
+        with pytest.raises(PolymarketAPIError) as exc:
+            await clob.post_order(draft)
     assert "insufficient allowance" in str(exc.value)
 
 
 async def test_post_order_raises_on_errorMsg_even_with_success_true():
-    from src.api.clob_client import CLOBClient
-
-    signer = MagicMock()
-    signer.create_order = MagicMock(return_value={})
-    signer.post_order = MagicMock(return_value={
+    clob, signer, patcher = await _build_clob_for_test({
         "success": True, "errorMsg": "partial rejection", "orderID": "x",
     })
-    clob = CLOBClient(signed_client=signer)
-
     draft = MagicMock()
     draft.neg_risk = False
     draft.tick_size = "0.01"
@@ -61,8 +84,9 @@ async def test_post_order_raises_on_errorMsg_even_with_success_true():
     draft.size = 10.0
     draft.side = "BUY"
 
-    with pytest.raises(PolymarketAPIError):
-        await clob.post_order(draft)
+    with patcher:
+        with pytest.raises(PolymarketAPIError):
+            await clob.post_order(draft)
 
 
 # ---------- H6 — tag exposure bucketing ----------

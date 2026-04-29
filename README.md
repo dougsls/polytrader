@@ -2,9 +2,9 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **109 testes** · ruff limpo · SQLite com WAL · web3.py para CTF · stack leve (~80 deps)
+Python 3.12+ · 100% async · **119 testes** · ruff limpo · SQLite com WAL · web3.py para CTF · stack leve (~80 deps)
 
-**HFT Mode** (opcional via config): consumidor concorrente de signals (`max_concurrent_signals` + `asyncio.Semaphore`), Optimistic Execution sem pre-flight REST `/book`, sizing proporcional ao patrimônio da baleia (`whale_portfolio_usd`), rollback atômico de arb com FOK no melhor bid. Trade-offs documentados.
+**HFT Mode** (opcional via config): consumidor concorrente de signals (`asyncio.Semaphore`), Optimistic Execution sem pre-flight REST `/book`, sizing proporcional ao patrimônio da baleia, rollback atômico de arb com FOK, **DB INSERT fora do hot path (fire-and-forget)**, **`post_order` 100% async via httpx + HMAC inline (zero `run_in_executor` no caminho de envio)**, **WebSocket reconect agressivo (50-150ms jitter) + zombie detection (3s silence threshold)**.
 
 > ⚠️ **Aviso.** Copy-trading de mercados de predição envolve risco real de perda de capital. Este projeto é infraestrutura — não um conselho financeiro. Opere em `paper` por 7-14 dias antes de `live`, e mesmo em live comece com 10% do capital-alvo. Leia a seção [Segurança e Modos de Operação](#segurança-e-modos-de-operação).
 
@@ -355,6 +355,30 @@ Trade-off explícito: paga-se em rejeições FOK (que contam como `POST_FAIL`, n
 
 Cobertura: 9 testes novos em [tests/test_optimistic_execution.py](tests/test_optimistic_execution.py) + [tests/test_concurrent_engine.py](tests/test_concurrent_engine.py).
 
+### Hot Path Optimization — eliminação de I/O síncrono
+
+Três mudanças que removem I/O síncrono do caminho crítico signal→fill:
+
+**1. SQLite INSERT fora do hot path.** `build_draft` antes fazia `INSERT INTO copy_trades` antes de `clob.post_order`. WAL é rápido (~1-3ms) mas em batches de 10 signals isso vira 10-30ms de latência composta antes da primeira ordem ir pro CLOB. Refactor: `build_draft` agora é puro RAM (constrói `OrderDraft` + `CopyTrade` em memória, retorna em sub-millisecond). O caller (`copy_engine`) chama `clob.post_order` PRIMEIRO, depois despacha `asyncio.create_task(persist_trade_async(trade))` paralelo a `apply_fill`. Disco sai do caminho crítico. Ver [src/executor/order_manager.py](src/executor/order_manager.py).
+
+**2. `post_order` 100% async via httpx — `run_in_executor` removido.** A SDK `py-clob-client` tem API síncrona (`requests` blocking). O fluxo antigo despachava signing+POST inteiro para `loop.run_in_executor` — thread context switch + GIL contention + `requests` blocking ~100ms NY→London. Em batches HFT, threads se acumulavam. Novo fluxo:
+
+```
+build_signed_order (CPU 5ms inline)  →  json.dumps canonical  →
+build_l2_headers (HMAC, ~1µs)  →  httpx.AsyncClient.post (HTTP/2 keep-alive)
+```
+
+O signing fica inline (5ms é aceitável; trade-off vs 100ms RTT que economizamos). O HMAC L2 é construído pelo nosso [src/api/clob_l2_auth.py](src/api/clob_l2_auth.py), implementação 1:1 com a SDK oficial (testes de paridade no `test_hft_hot_path.py`). O POST vai pelo singleton `httpx.AsyncClient` com HTTP/2 multiplexado — múltiplas ordens em paralelo sobre 1 conexão TCP. Ver [src/api/clob_client.py:107](src/api/clob_client.py#L107).
+
+**3. WebSocket reconect agressivo + zombie detection.** O exp-backoff antigo (até 60s) cega o bot por 1 minuto após qualquer blip de rede — em mercado de predição isso = perder rajada inteira de whale. Refactor:
+
+- **Reconect instantâneo**: jitter constante 50-150ms (sem exponential). Polymarket aceita reconect frequente sem rate-limit.
+- **Zombie detection**: `HeartbeatWatchdog` ganhou método `notify_message_received()` que registra timestamp do último frame recebido. Loop secundário verifica a cada 500ms — se silêncio > 3s, dispara `on_failure` e força reconnect. Polymarket emite ~3k msgs/s em pico; silêncio prolongado = TCP-zombie (conexão aceita keep-alive mas o stream parou). Sem essa detecção, o bot esperava o ping timeout de 10s+ cego.
+
+Ver [src/api/heartbeat.py](src/api/heartbeat.py) e [src/api/websocket_client.py](src/api/websocket_client.py).
+
+Cobertura: 10 testes novos em [tests/test_hft_hot_path.py](tests/test_hft_hot_path.py) — paridade HMAC com SDK oficial, build_draft sem disk I/O, `persist_trade_async` idempotente, silence detection trigger/reset/disabled.
+
 ---
 
 ## Performance
@@ -609,15 +633,16 @@ polytrader/
 │   ├── api/
 │   │   ├── auth.py                   # EOA L2 prefetch
 │   │   ├── balance.py                # USDC.e on-chain via web3
-│   │   ├── clob_client.py            # CLOB + retry_on_425
+│   │   ├── clob_client.py            # CLOB 100% async httpx (post_order HFT)
+│   │   ├── clob_l2_auth.py           # HMAC L2 headers (zero I/O, ~1µs)
 │   │   ├── data_client.py            # Data API (leaderboard/positions/trades)
 │   │   ├── gamma_client.py           # Gamma API + market_metadata_cache
-│   │   ├── heartbeat.py              # Diretiva 3 watchdog
-│   │   ├── http.py                   # httpx AsyncClient singleton
+│   │   ├── heartbeat.py              # Diretiva 3 + zombie detection (3s silence)
+│   │   ├── http.py                   # httpx AsyncClient singleton (HTTP/2)
 │   │   ├── order_builder.py          # Diretivas 1+4 aplicadas
 │   │   ├── retry.py                  # Diretiva 2 (@retry_on_425)
 │   │   ├── startup_checks.py         # geoblock + latency baseline
-│   │   └── websocket_client.py       # RTDS + orjson + Set filter (Regra 4)
+│   │   └── websocket_client.py       # RTDS + reconect 50-150ms + zombie
 │   │
 │   ├── scanner/
 │   │   ├── leaderboard.py            # fetch + agregação multi-período
@@ -691,10 +716,11 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 109 testes em ~4s
+uv run python -m pytest -q               # 119 testes em ~12s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
 uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
+uv run python -m pytest tests/test_hft_hot_path.py -v  # Hot path: HMAC, no disk I/O, zombie WS
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -713,6 +739,7 @@ Cobertura das leis:
 | Track B (Depth sizing) | `test_depth_sizing.py` |
 | HFT (Optimistic Exec) | `test_optimistic_execution.py` |
 | HFT (Concurrent engine) | `test_concurrent_engine.py` |
+| HFT (Hot path: HMAC + zombie WS) | `test_hft_hot_path.py` |
 
 ---
 

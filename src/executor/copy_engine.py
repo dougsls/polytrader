@@ -32,7 +32,7 @@ from src.core import metrics
 from src.core.models import CopyTrade, RiskState, TradeSignal
 from src.core.state import InMemoryState
 from src.executor.exposure import would_breach_tag_cap
-from src.executor.order_manager import build_draft
+from src.executor.order_manager import build_draft, persist_trade_async
 from src.executor.order_watchdog import watchdog_order
 from src.executor.position_manager import apply_fill
 from src.executor.risk_manager import RiskManager
@@ -80,22 +80,6 @@ class CopyEngine:
         # primeiro `apply_fill` write-through. O lock é fino (cobre só a
         # decisão, não o post_order, que é o caminho longo).
         self._risk_lock = asyncio.Lock()
-
-    async def _mark_trade_failed(self, trade_id: str, error: str) -> None:
-        """C2 — Atualiza copy_trades.status='failed' quando post_order rejeita."""
-        if self._conn is not None:
-            await self._conn.execute(
-                "UPDATE copy_trades SET status='failed', error=? WHERE id=?",
-                (error[:500], trade_id),
-            )
-            await self._conn.commit()
-        else:
-            async with get_connection(self._db_path) as db:
-                await db.execute(
-                    "UPDATE copy_trades SET status='failed', error=? WHERE id=?",
-                    (error[:500], trade_id),
-                )
-                await db.commit()
 
     async def _mark_skipped(self, signal: TradeSignal, reason: str) -> None:
         # Extrai classe do motivo (prefixo antes do ":") pra label baixa-cardinalidade
@@ -324,23 +308,24 @@ class CopyEngine:
         signal: TradeSignal, decision: Any, ref_price: float,
         perfect_mirror: bool, start_perf: float,
     ) -> None:
-        """Pós-decisão: build_draft → post_order → apply_fill.
+        """Pós-decisão: build_draft (RAM) → post_order → persist DB async → apply_fill.
 
-        Roda fora do `_risk_lock` — múltiplos signals podem postar em
-        paralelo limitados pelo `_post_semaphore` (rate de envio ao CLOB).
-
-        Optimistic Execution se manifesta aqui: quando ativo, force FOK
-        em vez de GTC para que rejeições do CLOB não deixem ordem viva.
+        HFT — Hot-Path:
+            Sequência crítica: o INSERT em copy_trades NÃO bloqueia o
+            envio da ordem. build_draft é puro RAM, post_order vai PRIMEIRO,
+            depois `asyncio.create_task(persist_trade_async)` corre em
+            paralelo com apply_fill. Disco SQLite (~1-3ms WAL) sai do
+            caminho crítico. Em rajadas de 10 signals, isso poupa 10-30ms
+            cumulativos do signal-to-fill.
         """
         import time as _t
 
-        # Build order (quantiza + neg_risk).
+        # 1. Build order — RAM only, sub-millisecond.
         draft, trade, _spec = await build_draft(
             signal=signal, sized_usd=decision.sized_usd, ref_price=ref_price,
             gamma=self._gamma, cfg=self._cfg, db_path=self._db_path,
         )
 
-        # Submit — Semaphore limita req/s ao CLOB.
         executed_price = float(draft.price)
         executed_size = float(draft.size)
         # HFT — Optimistic Execution força FOK pra rejeição on-exchange
@@ -349,6 +334,7 @@ class CopyEngine:
         if getattr(self._cfg, "optimistic_execution", False):
             order_type = "FOK"
 
+        # 2. Submit ANTES do disco — Semaphore limita req/s ao CLOB.
         if self._cfg.mode == "live":
             async with self._post_semaphore:
                 try:
@@ -364,20 +350,41 @@ class CopyEngine:
                             ), name=f"watchdog-{order_id[:8]}")
                 except NotImplementedError:
                     log.error("live_mode_not_wired", signal_id=signal.id)
+                    # DB persist com status final — fora do hot path.
+                    trade.status = "failed"
+                    trade.error = "LIVE_NOT_WIRED"
+                    asyncio.create_task(persist_trade_async(
+                        trade, conn=self._conn, db_path=self._db_path,
+                    ), name=f"persist-failed-{trade.id[:8]}")
                     await self._mark_skipped(signal, "LIVE_NOT_WIRED")
                     return
                 except PolymarketAPIError as exc:
                     tripped = self._risk.record_post_fail()
-                    await self._mark_trade_failed(trade.id, str(exc))
+                    # Atualiza trade em RAM e dispara persist com status="failed".
+                    trade.status = "failed"
+                    trade.error = str(exc)[:500]
+                    asyncio.create_task(persist_trade_async(
+                        trade, conn=self._conn, db_path=self._db_path,
+                    ), name=f"persist-failed-{trade.id[:8]}")
                     if tripped and self._on_event:
                         await self._on_event("risk_halt", signal, None)
                     await self._mark_skipped(signal, f"POST_FAIL: {exc}")
                     return
         elif self._cfg.mode == "dry-run":
             log.info("dry_run_skip_post", trade_id=trade.id)
+            # Dry-run ainda persiste trade (auditoria) — fire-and-forget.
+            asyncio.create_task(persist_trade_async(
+                trade, conn=self._conn, db_path=self._db_path,
+            ), name=f"persist-dryrun-{trade.id[:8]}")
             return
 
-        # Update positions — write-through state cache.
+        # 3. SUCESSO: persist em paralelo + apply_fill.
+        # `create_task` retorna imediatamente; o INSERT não atrasa apply_fill.
+        asyncio.create_task(persist_trade_async(
+            trade, conn=self._conn, db_path=self._db_path,
+        ), name=f"persist-{trade.id[:8]}")
+
+        # 4. Update positions — write-through state cache.
         await apply_fill(
             signal=signal, trade=trade,
             executed_size=executed_size, executed_price=executed_price,

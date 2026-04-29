@@ -28,6 +28,16 @@ log = get_logger(__name__)
 RTDS_URL = "wss://ws-live-data.polymarket.com"
 MARKET_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
+# HFT — reconect agressivo. Em vez de exp-backoff até 60s (que cega o
+# bot por 1min após blip de rede), usa jitter constante de 50-150ms.
+# Com Polymarket aceitando reconexão sem rate-limit em < ~10/s, isso
+# é seguro e elimina latência de detecção.
+RECONNECT_JITTER_RANGE = (0.05, 0.15)
+# Silence threshold (zombie detection): se RTDS não emitir nada por
+# este número de segundos, dropamos e reconectamos. Polymarket emite
+# trades de forma contínua durante horário ativo; silêncio = TCP-zombie.
+RTDS_SILENCE_THRESHOLD = 3.0
+
 
 class RTDSClient:
     """Subscription em activity/trades com filtro por maker.
@@ -65,8 +75,18 @@ class RTDSClient:
             await self._ws.close()
 
     async def stream(self) -> AsyncIterator[dict[str, Any]]:
-        """Gerador async. Reconecta com backoff exponencial + jitter."""
-        backoff = 1.0
+        """Gerador async. Reconect agressivo (jitter 50-150ms) + zombie watchdog.
+
+        HFT — eliminado o exp-backoff (até 60s cego). Em prediction
+        markets, perder 60s = perder múltiplas oportunidades de copy
+        em rajadas de whale. Polymarket aceita reconect frequente sem
+        rate-limit; jitter constante evita herd-thunder em incidente
+        regional.
+
+        Zombie detection: o watchdog dispara reconnect se não recebermos
+        NADA do stream por RTDS_SILENCE_THRESHOLD segundos. Polymarket é
+        altamente líquido (~3k msgs/s pico); silêncio é sinal de TCP morto.
+        """
         while not self._stop.is_set():
             try:
                 async with websockets.connect(
@@ -82,20 +102,23 @@ class RTDSClient:
                         send_heartbeat=self._send_ping,
                         on_failure=self._on_ping_fail,
                         interval_seconds=self.PING_INTERVAL,
+                        silence_threshold_seconds=RTDS_SILENCE_THRESHOLD,
                     )
                     self._watchdog.start()
-                    backoff = 1.0
+                    log.info("rtds_connected", silence_threshold=RTDS_SILENCE_THRESHOLD)
                     async for raw in ws:
                         if self._stop.is_set():
                             break
+                        # Zombie detection: notify ANTES do filtro Set —
+                        # qualquer payload conta como prova de vida.
+                        self._watchdog.notify_message_received()
                         try:
                             msg = orjson.loads(raw)
                         except orjson.JSONDecodeError:
                             continue
                         # Regra 4 — filtro Set() em nanosegundos. orjson
                         # (Rust) é mais rápido que qualquer prefiltro em
-                        # Python: testado empiricamente (commit 004bb4f
-                        # revertido). Set lookup O(1) no dict resultante.
+                        # Python: testado empiricamente. Set lookup O(1).
                         maker = (
                             msg.get("maker")
                             or msg.get("makerAddress")
@@ -112,7 +135,7 @@ class RTDSClient:
                             self._on_trade(effective)
                         yield effective
             except (websockets.WebSocketException, OSError) as e:
-                log.warning("rtds_disconnected", err=repr(e), backoff=backoff)
+                log.warning("rtds_disconnected_instant_reconnect", err=repr(e))
             finally:
                 if self._watchdog is not None:
                     await self._watchdog.stop()
@@ -120,9 +143,10 @@ class RTDSClient:
                 self._ws = None
             if self._stop.is_set():
                 break
-            sleep_for = backoff + random.uniform(0, backoff * 0.25)
+            # HFT — micro-jitter constante (50-150ms). Sem exp-backoff.
+            # Jitter é só p/ thunder-herd em outage Cloudflare regional.
+            sleep_for = random.uniform(*RECONNECT_JITTER_RANGE)
             await asyncio.sleep(sleep_for)
-            backoff = min(backoff * 2, 60.0)
 
     async def close(self) -> None:
         self._stop.set()

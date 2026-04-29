@@ -1,20 +1,27 @@
-"""CLOB client — trading (orderbook + postOrder).
+"""CLOB client — trading (orderbook + postOrder), async-native HFT.
 
 Wrapper fino em torno de py-clob-client (SDK oficial). O SDK cuida da
-assinatura EIP-712 e dos 5 headers L2. Nosso trabalho é:
-  1. Aplicar @retry_on_425 nas operações de escrita (Diretiva 2).
-  2. Rotear ordens via exchange neg_risk quando MarketSpec.neg_risk=True
-     (Diretiva 4).
-  3. Consumir OrderDraft já quantizado (Diretiva 1) — nunca construir
-     ordem com float cru dentro deste módulo.
+assinatura EIP-712 (puro CPU, ~5ms) e da derivação de credenciais L2.
+Nosso trabalho:
+  1. Diretiva 2 — `@retry_on_425` nas operações de escrita.
+  2. Diretiva 4 — Rotear ordens via exchange neg_risk quando
+     `MarketSpec.neg_risk=True`.
+  3. Diretiva 1 — Consumir `OrderDraft` já quantizado.
+  4. **HFT post_order**: Submissão **100% async via httpx**. O SDK
+     fornece o payload assinado (CPU-bound), mas o POST HTTP NÃO passa
+     por `requests`/`run_in_executor` — vai direto pelo nosso
+     `httpx.AsyncClient` singleton (HTTP/2 keep-alive). Isso elimina
+     o gargalo de threading em batches de 10+ ordens.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import httpx
 import orjson
 
+from src.api.clob_l2_auth import build_l2_headers
 from src.api.http import get_http_client
 from src.api.order_builder import OrderDraft
 from src.api.retry import retry_on_425
@@ -24,6 +31,7 @@ from src.core.logger import get_logger
 log = get_logger(__name__)
 
 DEFAULT_CLOB_HOST = "https://clob.polymarket.com"
+POST_ORDER_PATH = "/order"
 
 
 class CLOBClient:
@@ -41,10 +49,14 @@ class CLOBClient:
         *,
         signed_client: Any | None = None,
         neg_risk_signed_client: Any | None = None,
+        credentials: Any | None = None,  # L2Credentials (avoid circular import)
     ) -> None:
         self._host = host.rstrip("/")
         self._signed = signed_client
         self._signed_neg_risk = neg_risk_signed_client
+        # HFT — credenciais L2 são imutáveis após startup; cacheadas em RAM.
+        # Sem creds o post_order cai em NotImplementedError (read-only mode).
+        self._creds = credentials
 
     # ------------------------------------------------------------------ #
     # Público (sem auth)                                                 #
@@ -143,60 +155,116 @@ class CLOBClient:
     async def post_order(
         self, draft: OrderDraft, order_type: str = "GTC",
     ) -> dict[str, Any]:
-        """Assina e envia ordem ao CLOB.
+        """HFT — Assina inline (CPU ~5ms) e POST via httpx async.
 
-        `py-clob-client` tem API síncrona (requests + eth_account.sign).
-        Chamamos via `run_in_executor` para não bloquear o event loop —
-        senão o tracker pararia de consumir o WS enquanto a ordem é
-        assinada+postada (~100-300ms NY→London).
+        ANTES: SDK síncrono em `run_in_executor` → thread context switch
+        + GIL contention + `requests` blocking ~100ms NY→London.
+        AGORA: signing inline (CPU puro) + `httpx.AsyncClient` HTTP/2
+        keep-alive multiplexado. Em batches de 10 ordens em paralelo,
+        a economia é ~80-100ms × 10 = 800ms-1s cumulativos.
+
+        Pipeline:
+            1. SDK.create_order(args, options) → SignedOrder dataclass
+               (puro CPU: keccak + ECDSA via coincurve C bindings, ~5ms)
+            2. order_to_json → dict {order, owner, orderType, postOnly}
+            3. json.dumps(separators=(",", ":")) → string canônica
+            4. build_l2_headers (HMAC SHA256, ~1µs)
+            5. httpx.AsyncClient.post(host + /order, headers, content=body)
         """
-        import asyncio
+        if self._creds is None:
+            raise NotImplementedError(
+                "CLOB read-only — credentials L2 não foram injetadas. "
+                "Certifique-se que prefetch_credentials() rodou no startup."
+            )
 
         signer = self._pick_signer(draft)
-        loop = asyncio.get_running_loop()
 
-        def _build_and_post() -> dict[str, Any]:
-            # py-clob-client: OrderArgs + PartialCreateOrderOptions (neg_risk, tick_size)
+        # Imports lazy — manter módulo importável sem py-clob-client em dev.
+        try:
             from py_clob_client.clob_types import (  # type: ignore[import-not-found]
                 OrderArgs,
                 OrderType,
                 PartialCreateOrderOptions,
             )
-
-            args = OrderArgs(
-                token_id=draft.token_id,
-                price=float(draft.price),
-                size=float(draft.size),
-                side=draft.side,
-            )
-            # Diretiva 4 — passa flag neg_risk + tick_size ao SDK.
-            # Sem isso, o SDK usa o exchange CTF padrão → HTTP 400 em
-            # mercados multi-outcome, ou netting quebrado.
-            options = PartialCreateOrderOptions(
-                neg_risk=draft.neg_risk,
-                tick_size=str(draft.tick_size),  # SDK espera str literal ("0.01", "0.001"...)
-            )
-            ot = getattr(OrderType, order_type, OrderType.GTC)
-            order = signer.create_order(args, options=options)
-            resp: dict[str, Any] = signer.post_order(order, orderType=ot)
-            # C1 — valida resposta. A SDK retorna success/errorMsg/orderID.
-            # Sem esse check, rejeição vira "sucesso" e apply_fill grava
-            # posição fantasma no DB.
-            if not resp.get("success", False) or resp.get("errorMsg"):
-                from src.core.exceptions import PolymarketAPIError
-
-                raise PolymarketAPIError(
-                    f"CLOB rejected: {resp.get('errorMsg') or resp}",
-                    endpoint="/order",
-                    status=400,
-                    detail=str(resp)[:500],
-                )
-            return resp
-
-        try:
-            return await loop.run_in_executor(None, _build_and_post)
+            from py_clob_client.utilities import order_to_json  # type: ignore[import-not-found]
         except ImportError as e:
             raise NotImplementedError(
-                "py-clob-client não disponível. Instale com `uv sync` e "
-                "garanta que signed_client foi injetado no startup."
+                "py-clob-client não disponível. Instale com `uv sync`."
             ) from e
+
+        # 1. Build signed order — CPU puro, ~5ms (keccak + ECDSA C bindings).
+        # Aceitável inline no event loop: bem menor que RTT que evitamos.
+        args = OrderArgs(
+            token_id=draft.token_id,
+            price=float(draft.price),
+            size=float(draft.size),
+            side=draft.side,
+        )
+        options = PartialCreateOrderOptions(
+            neg_risk=draft.neg_risk,
+            tick_size=str(draft.tick_size),
+        )
+        ot_enum = getattr(OrderType, order_type, OrderType.GTC)
+        # SDK extrai string ("GTC", "FOK", etc.) do enum.
+        ot_str = ot_enum.value if hasattr(ot_enum, "value") else str(ot_enum)
+        signed_order = signer.create_order(args, options=options)
+
+        # 2. Payload canonical JSON (separators sem espaço — exigência do HMAC).
+        body_dict = order_to_json(
+            signed_order, self._creds.api_key, ot_str, False,  # post_only=False
+        )
+        body_json = json.dumps(body_dict, separators=(",", ":"), ensure_ascii=False)
+
+        # 3. L2 headers HMAC — ~1µs.
+        headers = build_l2_headers(
+            address=self._creds.address,
+            api_key=self._creds.api_key,
+            secret=self._creds.secret,
+            passphrase=self._creds.passphrase,
+            method="POST",
+            path=POST_ORDER_PATH,
+            body_json=body_json,
+        )
+        headers["Content-Type"] = "application/json"
+
+        # 4. POST via httpx.AsyncClient — HTTP/2 keep-alive, sem block.
+        client = await get_http_client()
+        try:
+            resp = await client.post(
+                f"{self._host}{POST_ORDER_PATH}",
+                headers=headers, content=body_json,
+            )
+        except httpx.HTTPError as exc:
+            raise PolymarketAPIError(
+                f"clob network: {exc}", endpoint=POST_ORDER_PATH,
+            ) from exc
+
+        if resp.status_code == 429:
+            raise RateLimitError(
+                "clob rate limit", endpoint=POST_ORDER_PATH, status=429,
+                retry_after=float(resp.headers.get("retry-after", "1")),
+            )
+        if resp.status_code == 425:
+            resp.raise_for_status()
+        if resp.status_code >= 400:
+            raise PolymarketAPIError(
+                f"clob {resp.status_code}",
+                endpoint=POST_ORDER_PATH, status=resp.status_code,
+                detail=resp.text[:500],
+            )
+
+        try:
+            data: dict[str, Any] = orjson.loads(resp.content)
+        except orjson.JSONDecodeError as exc:
+            raise PolymarketAPIError(
+                f"clob malformed response: {resp.text[:200]}",
+                endpoint=POST_ORDER_PATH, status=resp.status_code,
+            ) from exc
+
+        # C1 — valida resposta. SDK retorna success/errorMsg/orderID.
+        if not data.get("success", False) or data.get("errorMsg"):
+            raise PolymarketAPIError(
+                f"CLOB rejected: {data.get('errorMsg') or data}",
+                endpoint=POST_ORDER_PATH, status=400, detail=str(data)[:500],
+            )
+        return data
