@@ -2,7 +2,9 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **100 testes** · ruff limpo · SQLite com WAL · web3.py para CTF · stack leve (~80 deps)
+Python 3.12+ · 100% async · **109 testes** · ruff limpo · SQLite com WAL · web3.py para CTF · stack leve (~80 deps)
+
+**HFT Mode** (opcional via config): consumidor concorrente de signals (`max_concurrent_signals` + `asyncio.Semaphore`), Optimistic Execution sem pre-flight REST `/book`, sizing proporcional ao patrimônio da baleia (`whale_portfolio_usd`), rollback atômico de arb com FOK no melhor bid. Trade-offs documentados.
 
 > ⚠️ **Aviso.** Copy-trading de mercados de predição envolve risco real de perda de capital. Este projeto é infraestrutura — não um conselho financeiro. Opere em `paper` por 7-14 dias antes de `live`, e mesmo em live comece com 10% do capital-alvo. Leia a seção [Segurança e Modos de Operação](#segurança-e-modos-de-operação).
 
@@ -326,6 +328,32 @@ depth_sizing:
 ```
 
 7 testes dedicados em [tests/test_depth_sizing.py](tests/test_depth_sizing.py) validam BUY/SELL, caps por impact, capacidade per-level e books vazios.
+
+### HFT Mode — concorrência, optimistic execution, perfect-mirror real
+
+Quatro mudanças cirúrgicas que aproximam o copy-engine de uma mesa profissional. Todas opcionais via config — defaults preservam comportamento conservador.
+
+**1. Consumidor concorrente da fila de signals.** O `run_loop` antigo era estritamente sequencial — `await self.handle_signal(signal)` por sinal. Em rajadas (whale dispara 10 trades em 2s), a 9ª esperava as 8 anteriores fillarem. Refatorado para `asyncio.create_task` por sinal, limitado por `asyncio.Semaphore(max_concurrent_signals)`. Default 4 → ~40 ord/s com RTT 100ms NY→London, longe do rate limit Polymarket. Um `asyncio.Lock` guarda a seção de **decisioning** (risk gates + cash availability + market cap) para evitar over-subscription quando dois signals leem `cash_available` simultaneamente. O lock é fino: cobre só leitura+decisão; o `post_order` roda fora dele.
+
+```yaml
+executor:
+  max_concurrent_signals: 4   # 4 ordens em flight, paralelo seguro
+```
+
+**2. Optimistic Execution (sem pre-flight REST).** O modo defensivo (`check_slippage_or_abort`) baixa `/book` antes de cada ordem para validar `best_ask ≤ whale × (1 + tolerance)`. Em NY→London isso custa ~80-130ms extra por trade. O modo otimista (`compute_optimistic_ref_price` em [src/executor/slippage.py](src/executor/slippage.py)) é uma função pura: embute a tolerance no `limit_price` e dispara FOK direto. O CLOB rejeita on-exchange se o livro andou — economizamos o round-trip e a decisão de match acontece no matching engine.
+
+```yaml
+executor:
+  optimistic_execution: true   # FOK direto, sem /book pre-flight
+```
+
+Trade-off explícito: paga-se em rejeições FOK (que contam como `POST_FAIL`, não como exposure). Para cargas direcionais agressivas, o ganho de latência supera as rejeições; o operador vê isso em `trades_skipped{reason_class="POST_FAIL"}` versus a redução de `signal_to_fill_seconds`.
+
+**3. Perfect-Mirror Sizing real.** O `paper_perfect_mirror` antigo usava `target = starting_bank × proportional_factor` — alocação cega de 10% da banca, ignorando o que a whale fez. A refactor lê `signal.whale_portfolio_usd` (vindo do `enrich`) e calcula `whale_pct = signal.usd_value / whale_portfolio_usd`. Em seguida aplica essa **mesma percentagem exata** à banca ativa do bot, multiplicada por `whale_sizing_factor` para amplificar/atenuar convicção. Quando `whale_portfolio_usd` está ausente, cai no fallback antigo. Loga `perfect_mirror_sized` com `whale_pct` e `sized` para auditoria.
+
+**4. Rollback atômico em `arbitrage/executor.py`.** Se a leg YES filla via FOK e a NO falha (livro andou em ms), o bot lia best_bid via `clob.book(stuck_token_id)`, quantizava com `tick_size + neg_risk` corretos via `MarketSpec`, e dispara **FOK SELL** no best_bid. O FOK garante atomicidade: parcial deixaria resíduo direcional, exatamente o problema. Quando falha (book sem bid ou FOK rejeitado on-exchange), persiste como `rolled_back` com erro detalhado e dispara alerta Telegram para o operador. PnL realizado = `-(spread × size)` — dano contido em vez de exposure aberta.
+
+Cobertura: 9 testes novos em [tests/test_optimistic_execution.py](tests/test_optimistic_execution.py) + [tests/test_concurrent_engine.py](tests/test_concurrent_engine.py).
 
 ---
 
@@ -663,9 +691,10 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 100 testes em ~4s
+uv run python -m pytest -q               # 109 testes em ~4s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
+uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -682,6 +711,8 @@ Cobertura das leis:
 | Diretiva 4 (neg_risk) | `test_order_builder.py` |
 | Track A (Arb scanner) | `test_arbitrage_scanner.py`, `test_arbitrage_models.py` |
 | Track B (Depth sizing) | `test_depth_sizing.py` |
+| HFT (Optimistic Exec) | `test_optimistic_execution.py` |
+| HFT (Concurrent engine) | `test_concurrent_engine.py` |
 
 ---
 

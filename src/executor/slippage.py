@@ -7,6 +7,13 @@ saída do mercado eufórico.
 
 Regra: se `best_ask > whale_price * (1 + tolerance)`, ABORTAR.
 Para SELL, espelho: `best_bid < whale_price * (1 - tolerance)` → abortar.
+
+Dois modos de aplicação da regra:
+  - **Defensive** (`check_slippage_or_abort`): puxa /book antes de postar.
+    Aborta no client. 1 round-trip extra (~80-130ms NY→London).
+  - **Optimistic** (`compute_optimistic_ref_price`): pura, sem I/O.
+    Embute a tolerance no limit price e deixa o CLOB rejeitar via FOK
+    se o livro andou. Zero round-trip extra; trade-off HFT clássico.
 """
 from __future__ import annotations
 
@@ -34,6 +41,37 @@ def _best_bid_from_book(book: dict[str, Any]) -> float:
         raise ValueError("book sem bids")
     first = bids[0]
     return float(first["price"] if isinstance(first, dict) else first[0])
+
+
+def compute_optimistic_ref_price(
+    *,
+    side: Literal["BUY", "SELL"],
+    whale_price: float,
+    tolerance_pct: float,
+) -> float:
+    """Optimistic Execution — calcula o limit price sem chamar /book.
+
+    A âncora continua sendo o `whale_price`. A tolerância é embutida no
+    limit price: BUY paga até `whale_price × (1 + tolerance)`, SELL
+    aceita receber até `whale_price × (1 - tolerance)`. O CLOB rejeita
+    on-exchange (FOK) se o book andou além desse limite — economizamos
+    o round-trip REST de /book.
+
+    Trade-off vs check_slippage_or_abort:
+      - PRO: 1 round-trip a menos (~80-130ms NY→London poupados)
+      - PRO: a decisão de match acontece no matching engine, não no client
+      - CON: ordem chega ao CLOB e é rejeitada se livro andou; isso conta
+              como "trade falhado" mas não como exposure
+      - CON: sem spread shield (deve ser feito separadamente se desejado)
+
+    Use combinado com `default_order_type: "FOK"` para garantir que
+    rejeições não deixem GTC pendurado.
+    """
+    if whale_price <= 0:
+        raise ValueError("whale_price inválido")
+    if side == "BUY":
+        return whale_price * (1.0 + tolerance_pct)
+    return whale_price * (1.0 - tolerance_pct)
 
 
 async def check_slippage_or_abort(

@@ -216,6 +216,15 @@ class ExecutorConfig(_StrictModel):
     min_confidence_score: float = Field(ge=0.0, le=1.0)
     enforce_market_duration: bool
     skip_reason_on_long_market: str
+    # HFT — concorrência no consumidor da fila. Default 4 = ~40 ord/s
+    # com RTT 100ms NY→London, longe do cap de rate limit Polymarket.
+    # Aumentar para 8-16 quando colocar a VPS em Dublin/London.
+    max_concurrent_signals: int = Field(ge=1, le=64, default=4)
+    # HFT — Optimistic Execution: pula pre-flight /book REST call e
+    # dispara FOK direto com limit_price = whale_price ± tolerance.
+    # Reduz latência (1 round-trip a menos), mas algumas ordens serão
+    # rejeitadas pelo CLOB se o livro andou. Tradeoff de HFT clássico.
+    optimistic_execution: bool = False
 
     @field_validator("max_price")
     @classmethod

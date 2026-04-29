@@ -123,6 +123,12 @@ executor:
   enforce_market_duration: true
   skip_reason_on_long_market: "BLOCKED: market resolves in {days}d, max allowed is {max}h"
 
+  # ⚡ HFT — Optimistic Execution em LIVE: economiza ~80-130ms por trade.
+  # Com whale_max_slippage_pct: 0.03, FOK rejeita on-exchange se livro
+  # andou >3% além do whale price.
+  max_concurrent_signals: 4
+  optimistic_execution: true
+
 dashboard:
   enabled: true
   host: "0.0.0.0"

@@ -135,6 +135,14 @@ executor:
   enforce_market_duration: true
   skip_reason_on_long_market: "BLOCKED: market resolves in {days}d, max allowed is {max}h"
 
+  # HFT — concorrência do consumidor da fila de signals. Limita req/s
+  # ao CLOB via asyncio.Semaphore. NY→London RTT ~100ms × 4 = ~40 ord/s.
+  max_concurrent_signals: 4
+  # HFT — Optimistic Execution: pula REST /book pre-flight, manda FOK
+  # direto com limit_price = whale_price ± whale_max_slippage_pct.
+  # Trade-off: economiza 1 round-trip mas paga em rejeições FOK.
+  optimistic_execution: false
+
 # === Dashboard ===
 dashboard:
   enabled: true

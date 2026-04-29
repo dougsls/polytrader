@@ -1,4 +1,4 @@
-"""Testes dos modelos Pydantic da arb."""
+"""Testes dos modelos Pydantic da arb + slippage helpers HFT."""
 from __future__ import annotations
 
 from datetime import datetime, timezone

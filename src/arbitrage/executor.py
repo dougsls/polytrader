@@ -341,21 +341,110 @@ class ArbExecutor:
         return False
 
     async def _rollback(self, execution: ArbExecution) -> None:
-        """Uma leg fillou e a outra não — vende a fillada pra zerar exposure.
+        """Uma leg fillou e a outra não — vende imediatamente a fillada
+        via FOK no melhor bid pra estancar exposure direcional.
 
-        Não é mágica: pode dar prejuízo (spread bid-ask). Mas evita ficar
-        com posição direcional não-coberta. Erro contido.
+        FOK (não IOC parcial) é proposital: parcial deixa resíduo
+        direcional não-coberto, que é exatamente o problema que estamos
+        tentando evitar. Se o FOK falha (book sem bid suficiente), o
+        rollback ficou pendurado e operador é alertado.
+
+        Lucro esperado: NEGATIVO (= -spread × size). É dano contido.
         """
+        # Identifica qual leg fillou (XOR já garantido pelo caller).
+        if execution.yes_leg.status == "filled":
+            stuck_leg = execution.yes_leg
+        elif execution.no_leg.status == "filled":
+            stuck_leg = execution.no_leg
+        else:
+            execution.status = "failed"
+            execution.error = "ROLLBACK_INVARIANT: nenhuma leg filled"
+            return
+
         log.warning(
             "arb_rollback_triggered",
-            yes=execution.yes_leg.status, no=execution.no_leg.status,
+            stuck_side=stuck_leg.side, token=stuck_leg.token_id,
+            size=stuck_leg.fill_size, paid=stuck_leg.fill_price,
         )
+
+        # 1. Lê book atual da leg pendurada → best_bid.
+        try:
+            book = await self.clob.book(stuck_leg.token_id)
+        except Exception as exc:  # noqa: BLE001
+            execution.status = "rolled_back"
+            execution.error = f"ROLLBACK_BOOK_FAIL: {exc!r} — leg {stuck_leg.side} pendurada"
+            return
+        bids = book.get("bids") or []
+        if not bids:
+            execution.status = "rolled_back"
+            execution.error = (
+                f"ROLLBACK_NO_BID: livro sem bids para {stuck_leg.side} "
+                f"(token {stuck_leg.token_id[:10]}…) — leg pendurada, vender manual"
+            )
+            return
+        best_bid = float(bids[0]["price"])
+
+        # 2. Re-busca spec do mercado pra quantizar SELL com tick correto.
+        try:
+            market = await self.gamma.get_market(execution.condition_id)
+        except Exception as exc:  # noqa: BLE001
+            execution.status = "rolled_back"
+            execution.error = f"ROLLBACK_GAMMA_FAIL: {exc!r}"
+            return
+        tick = Decimal(str(market.get("minimum_tick_size") or market.get("tick_size") or 0.01))
+        size_step = Decimal(str(market.get("min_order_size") or "1"))
+        spec = MarketSpec(
+            condition_id=execution.condition_id, token_id=stuck_leg.token_id,
+            tick_size=tick, size_step=size_step,
+            neg_risk=bool(market.get("neg_risk") or market.get("negRisk")),
+        )
+        try:
+            sell_size = stuck_leg.fill_size or 0.0
+            if sell_size <= 0:
+                raise ValueError("fill_size inválido para rollback")
+            sell_draft = build_order(spec, "SELL", best_bid, sell_size)
+        except Exception as exc:  # noqa: BLE001
+            execution.status = "rolled_back"
+            execution.error = f"ROLLBACK_QUANTIZE: {exc!r}"
+            return
+
+        # 3. Posta FOK SELL no best_bid. Se falha, leg fica pendurada.
+        try:
+            resp = await self.clob.post_order(sell_draft, order_type="FOK")
+            if not resp.get("success") or resp.get("errorMsg"):
+                raise PolymarketAPIError(
+                    f"FOK SELL rejected: {resp.get('errorMsg') or resp}",
+                    endpoint="/order", status=400,
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "arb_rollback_fok_failed",
+                op_id=execution.opportunity_id, err=repr(exc),
+            )
+            execution.status = "rolled_back"
+            execution.error = (
+                f"ROLLBACK_FOK_FAIL: {exc!r} — leg {stuck_leg.side} ainda exposta. "
+                "Operador deve liquidar manualmente."
+            )
+            return
+
+        # 4. Sucesso: registra a perda contida (spread bid-ask).
+        proceeds = best_bid * sell_size
+        cost = (stuck_leg.fill_price or 0.0) * sell_size
+        rollback_pnl = proceeds - cost  # tipicamente negativo (= -spread)
+        execution.realized_pnl_usd = rollback_pnl
+        execution.merge_status = "skipped"
         execution.status = "rolled_back"
-        # TODO: implementar venda imediata via FOK no melhor bid.
-        # Requer um draft SELL e re-quantize. Pra primeira versão,
-        # marca como rolled_back e deixa o operador resolver manual via
-        # dashboard/Telegram alert. Em paper esse caminho não é exercido.
-        execution.error = (execution.error or "") + " [auto-rollback PENDENTE — vender manualmente]"
+        execution.error = (
+            f"ROLLBACK_OK: vendeu {sell_size:.4f} de {stuck_leg.side} @ {best_bid:.4f} "
+            f"(comprou @ {stuck_leg.fill_price:.4f}) → pnl {rollback_pnl:+.4f} USDC"
+        )
+        log.info(
+            "arb_rollback_executed",
+            op_id=execution.opportunity_id, stuck_side=stuck_leg.side,
+            fill_price=stuck_leg.fill_price, exit_bid=best_bid,
+            size=sell_size, pnl=rollback_pnl,
+        )
 
     async def _persist_execution(self, e: ArbExecution) -> None:
         await self.conn.execute(
