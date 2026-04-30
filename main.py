@@ -42,6 +42,7 @@ from src.executor.price_updater import price_update_loop
 from src.executor.resolution_watcher import resolution_check_loop
 from src.executor.risk_manager import RiskManager
 from src.executor.risk_state import build_risk_state
+from src.dashboard.demo_snapshot_loop import demo_snapshot_loop
 from src.executor.stale_cleanup import stale_position_cleanup_loop
 from src.notifier.daily_summary import daily_summary_loop
 from src.notifier.telegram import TelegramNotifier
@@ -597,6 +598,19 @@ async def amain() -> None:
                 conn=shared_conn, signal_queue=signal_queue,
             ),
             name="stale-cleanup",
+        ),
+        # Demo snapshot loop — só em modo paper, alimenta equity curve
+        # e readiness score com snapshots a cada 60s.
+        asyncio.create_task(
+            demo_snapshot_loop(
+                shutdown=shutdown,
+                conn=shared_conn,
+                starting_bank_usd=float(settings.config.executor.max_portfolio_usd),
+                state=state,
+                balance_cache=balance_cache,
+                queue=signal_queue,
+            ),
+            name="demo-snapshot",
         ),
         asyncio.create_task(
             daily_summary_loop(
