@@ -31,6 +31,7 @@ from src.core.logger import get_logger
 from src.core import metrics
 from src.core.models import CopyTrade, RiskState, TradeSignal
 from src.core.state import InMemoryState
+from src.dashboard.demo_persistence import record_journal_entry
 from src.executor.depth_sizing import quote_buy_depth, quote_sell_depth
 from src.executor.exposure import would_breach_tag_cap
 from src.executor.order_manager import (
@@ -39,6 +40,7 @@ from src.executor.order_manager import (
     update_trade_status,
 )
 from src.executor.order_watchdog import watchdog_order
+from src.executor.paper_simulator import fetch_book_safe, simulate_fill
 from src.executor.position_manager import apply_fill
 from src.executor.risk_manager import RiskManager
 from src.executor.slippage import check_slippage_or_abort, compute_optimistic_ref_price
@@ -501,7 +503,62 @@ class CopyEngine:
             return
 
         if self._cfg.mode != "live":
-            # Paper — simulação de fill imediato (comportamento legado).
+            # Paper realista (24h DEMO) — quando NÃO é perfect_mirror,
+            # busca book real e simula fill via VWAP. Skipa se book vazio,
+            # spread > max, slippage > tolerância ou depth insuficiente.
+            # Stale/emergency exits ignoram spread+slippage mas ainda
+            # exigem book não vazio.
+            if not getattr(self._cfg, "paper_perfect_mirror", False):
+                book = await fetch_book_safe(self._clob, signal.token_id)
+                sim = simulate_fill(
+                    signal=signal, book=book,
+                    intended_size=executed_size,
+                    intended_price=executed_price,
+                    cfg=self._cfg,
+                )
+                # Audit ABSOLUTAMENTE TUDO no journal (executed/partial/skipped).
+                intended_usd = executed_size * executed_price
+                await record_journal_entry(
+                    signal=signal, sim=sim,
+                    intended_size_usd=intended_usd,
+                    source=signal.source,
+                    conn=self._conn, db_path=self._db_path,
+                )
+                if not sim.filled:
+                    # Skip: zero fill. Não atualiza state.
+                    await update_trade_status(
+                        trade.id, status="failed",
+                        error=f"PAPER_REALISTIC_SKIP: {sim.skip_reason}",
+                        conn=self._conn, db_path=self._db_path,
+                    )
+                    await self._mark_skipped(
+                        signal, f"PAPER_REALISTIC: {sim.skip_reason}",
+                    )
+                    log.info(
+                        "paper_realistic_skipped",
+                        signal_id=signal.id, reason=sim.skip_reason,
+                        spread=f"{sim.spread:.4f}",
+                        slippage=f"{sim.slippage:.4f}",
+                    )
+                    return
+                # Fill (executed ou partial) — usa simulated price/size REAIS.
+                await self._apply_fill_local(
+                    signal=signal, trade=trade,
+                    executed_size=sim.simulated_size,
+                    executed_price=sim.simulated_price,
+                    start_perf=start_perf,
+                )
+                log.info(
+                    "paper_realistic_filled",
+                    signal_id=signal.id, status=sim.status,
+                    sim_price=f"{sim.simulated_price:.4f}",
+                    sim_size=f"{sim.simulated_size:.2f}",
+                    slippage=f"{sim.slippage:.4f}",
+                    is_emergency=sim.is_emergency_exit,
+                )
+                return
+            # paper_perfect_mirror=True (DEPRECATED, fakefill no preço whale).
+            # Mantido pra observação bruta apenas — NUNCA usar pra avaliar.
             await self._apply_fill_local(
                 signal=signal, trade=trade,
                 executed_size=executed_size, executed_price=executed_price,
