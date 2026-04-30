@@ -143,6 +143,12 @@ executor:
   # Trade-off: economiza 1 round-trip mas paga em rejeições FOK.
   optimistic_execution: false
 
+  # ARQUITETURA — concorrência máxima de chamadas REST de background
+  # (Scanner enrich, Resolution batch, snapshot_whale). Hot path (CLOB
+  # post_order, RTDS, detect_signal gamma) NÃO compete por essas slots.
+  # 5 = ~5 reqs/s — fica MUITO abaixo do rate limit Polymarket data-api.
+  background_max_concurrent: 5
+
 # === Dashboard ===
 dashboard:
   enabled: true

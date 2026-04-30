@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.api.background_limiter import get_background_limiter
 from src.api.data_client import DataAPIClient
 from src.core.database import DEFAULT_DB_PATH, get_connection
 from src.core.logger import get_logger
@@ -30,7 +31,10 @@ async def snapshot_whale(
     Faz write-through no `state` (Fase 4) para que o fast-path do
     `detect_signal` veja o snapshot em < 1μs.
     """
-    positions = await data_client.positions(wallet_address)
+    # ⚠️ ARQUITETURA — chamada de background; não compete com hot path.
+    bg = get_background_limiter()
+    async with bg.acquire():
+        positions = await data_client.positions(wallet_address)
     now = datetime.now(timezone.utc).isoformat()
     # Normalização: DB + state guardam sempre lowercase.
     wallet_address = wallet_address.lower()

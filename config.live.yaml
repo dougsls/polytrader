@@ -128,6 +128,9 @@ executor:
   # andou >3% além do whale price.
   max_concurrent_signals: 4
   optimistic_execution: true
+  # Live: 5 reqs concurrent pra background é seguro. Subir só se
+  # operador validar que data-api comporta sem 429.
+  background_max_concurrent: 5
 
 dashboard:
   enabled: true

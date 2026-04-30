@@ -266,6 +266,59 @@ class GammaAPIClient:
             out.append(m)
         return out
 
+    async def get_markets_batch(
+        self,
+        condition_ids: list[str],
+        *,
+        chunk_size: int = 50,
+    ) -> dict[str, dict[str, Any]]:
+        """Batch fetch — 1 request HTTP por chunk em vez de N.
+
+        ⚠️ RATE-LIMIT FIX: o resolution_watcher antigo fazia N requests
+        sequenciais (1 por position aberta). Em 50 positions × tick
+        de 60s = 50 reqs/min bypassando cache → ban Cloudflare.
+
+        Esta função:
+            1. Particiona em chunks ≤ 50 (URL length limit ~3KB).
+            2. Faz UMA request /markets?condition_ids=ID1,ID2,...
+            3. Mira RAM + SQLite cache pra cada market retornado.
+            4. Retorna dict {condition_id_lower → market_dict}.
+
+        Returns:
+            Dict com chave em LOWERCASE; condition_ids missing no
+            response são silenciosamente omitidos (caller decide o que
+            fazer com a ausência).
+        """
+        if not condition_ids:
+            return {}
+        # Dedup case-insensitive — Gamma trata IDs case-insensitive mas
+        # nosso cache usa o case original.
+        unique_ids = list({cid for cid in condition_ids if cid})
+        out: dict[str, dict[str, Any]] = {}
+
+        for i in range(0, len(unique_ids), chunk_size):
+            chunk = unique_ids[i : i + chunk_size]
+            # Polymarket Gamma 2026: aceita lista comma-separated.
+            params = {"condition_ids": ",".join(chunk)}
+            try:
+                data = await self._get("/markets", params=params)
+            except PolymarketAPIError as exc:
+                log.warning(
+                    "gamma_batch_chunk_failed",
+                    chunk_start=i, chunk_size=len(chunk), err=repr(exc)[:80],
+                )
+                continue
+            if not isinstance(data, list):
+                continue
+            for market in data:
+                cid = market.get("conditionId") or market.get("condition_id")
+                if not cid:
+                    continue
+                # Mira ambos os caches pra acelerar próximas leituras.
+                await self._write_cache(cid, market)
+                out[cid.lower()] = market
+        return out
+
     async def get_market(self, condition_id: str, *, force_refresh: bool = False) -> dict[str, Any]:
         # HFT — pirâmide 3-tier: RAM (~50ns) → SQLite (~500µs) → REST (~100ms).
         if not force_refresh:

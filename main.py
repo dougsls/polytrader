@@ -16,6 +16,7 @@ import aiosqlite
 import uvicorn
 
 from src.api.auth import prefetch_credentials
+from src.api.background_limiter import configure_background_limiter
 from src.api.balance import USDCBalanceFetcher
 from src.api.clob_client import CLOBClient
 from src.api.data_client import DataAPIClient
@@ -133,6 +134,10 @@ async def amain() -> None:
         vps=f"{settings.env.vps_provider}-{settings.env.vps_location}",
         event_loop=f"{type(_running_loop).__module__}.{type(_running_loop).__name__}",
     )
+
+    # ARQUITETURA — configura BackgroundRateLimiter ANTES de qualquer
+    # chamada REST de auditoria (Scanner enrich, Resolution batch).
+    configure_background_limiter(settings.config.executor.background_max_concurrent)
 
     await init_database()
 
@@ -369,6 +374,25 @@ async def amain() -> None:
         on_event=on_event, conn=shared_conn,
     )
 
+    # --- CTF client compartilhado — usado por:
+    #     (a) arbitrage executor (merge_binary)
+    #     (b) resolution_watcher (redeem on-chain — FUND-LOCK FIX)
+    # Só instancia em mode=live com private_key. Paper/dry-run pula
+    # redeem on-chain (marca redeem_tx_hash="paper-skip").
+    ctf: CTFClient | None = None
+    if (
+        settings.config.executor.mode == "live"
+        and settings.env.private_key
+    ):
+        ctf = CTFClient(
+            rpc_url=settings.env.polygon_rpc_url,
+            ctf_address=settings.env.ctf_contract_address,
+            usdc_address=settings.env.usdc_contract_address,
+            private_key=settings.env.private_key,
+            funder_address=settings.env.funder_address or None,
+        )
+        log.info("ctf_client_wired_for_redeem_and_merge")
+
     # --- arbitrage engine (Track A) — RODA EM PARALELO ao copy-trader -----
     # Capital separado (cfg.arbitrage.max_capital_usd), risk profile próprio.
     # Edge matemático: YES+NO < 1 → mergePositions no CTF devolve $1.
@@ -376,23 +400,15 @@ async def amain() -> None:
     arb_scanner: ArbScanner | None = None
     arb_executor: ArbExecutor | None = None
     if settings.config.arbitrage.enabled:
-        # CTF client só é necessário se mode=live + auto_merge.
-        ctf: CTFClient | None = None
+        # Arb LIVE com auto_merge requer CTF; já criado acima ou erro.
         if (
             settings.config.arbitrage.mode == "live"
             and settings.config.arbitrage.auto_merge
+            and ctf is None
         ):
-            if not settings.env.private_key:
-                log.critical("arb_live_requires_private_key")
-                notifier.notify("🚨 Arb LIVE pediu PRIVATE_KEY mas .env vazio.")
-                sys.exit(1)
-            ctf = CTFClient(
-                rpc_url=settings.env.polygon_rpc_url,
-                ctf_address=settings.env.ctf_contract_address,
-                usdc_address=settings.env.usdc_contract_address,
-                private_key=settings.env.private_key,
-                funder_address=settings.env.funder_address or None,
-            )
+            log.critical("arb_live_requires_private_key")
+            notifier.notify("🚨 Arb LIVE pediu PRIVATE_KEY mas .env vazio.")
+            sys.exit(1)
         arb_scanner = ArbScanner(
             cfg=settings.config.arbitrage, gamma=gamma, clob=clob,
             queue=arb_queue, conn=shared_conn,
@@ -489,7 +505,10 @@ async def amain() -> None:
             name="price-updater",
         ),
         asyncio.create_task(
-            resolution_check_loop(shutdown=shutdown, conn=shared_conn, gamma=gamma),
+            resolution_check_loop(
+                shutdown=shutdown, conn=shared_conn, gamma=gamma,
+                ctf=ctf, notifier=notifier,
+            ),
             name="resolution-watcher",
         ),
         asyncio.create_task(

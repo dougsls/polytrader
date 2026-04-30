@@ -225,6 +225,12 @@ class ExecutorConfig(_StrictModel):
     # Reduz latência (1 round-trip a menos), mas algumas ordens serão
     # rejeitadas pelo CLOB se o livro andou. Tradeoff de HFT clássico.
     optimistic_execution: bool = False
+    # ARQUITETURA — concorrência máxima de chamadas REST de background
+    # (Scanner enrich, Resolution batch, snapshot_whale). Hot path (CLOB
+    # post_order, RTDS, detect_signal gamma) NÃO passa pelo limiter.
+    # 5 concurrent ≈ ~5 reqs/s steady-state. Default conservador para
+    # nunca disputar conexões TCP com o trading.
+    background_max_concurrent: int = Field(ge=1, le=64, default=5)
 
     @field_validator("max_price")
     @classmethod

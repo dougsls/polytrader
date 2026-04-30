@@ -2,7 +2,7 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **169 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
+Python 3.12+ · 100% async · **188 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
 
 **HFT Mode** (opcional via config): consumidor concorrente de signals, Optimistic Execution sem pre-flight REST, sizing proporcional ao patrimônio da baleia, rollback atômico, **DB INSERT fora do hot path**, **`post_order` 100% async via httpx + HMAC inline**, **WebSocket reconect agressivo + zombie detection**, **`GammaAPIClient` 3-tier cache (RAM 50ns → SQLite 500µs → REST 100ms)**, **`TradeEvent` dataclass com slots**, **drift correction via `currentSize` (full-exit override quando whale zera)**, **VWAP scanner (elimina falso-positivo Top of Book)**, **CTF `AsyncWeb3` nativo (zero `run_in_executor`) + EIP-1559 dinâmico via Polygon Gas Station**.
 
@@ -475,6 +475,40 @@ Três falhas perigosas no `RiskManager` corrigidas (vulnerabilidades de fundos q
 
 Cobertura: 14 testes novos em [tests/test_risk_refactor.py](tests/test_risk_refactor.py) — SELL bypass em daily_loss/drawdown, BUY ainda bloqueado, MAX_POSITIONS/PORTFOLIO_CAP só pra BUY, LOW_SCORE+PRICE_BAND ainda validam SELL, Kelly com win_rate puro vs fallback, distortion regression demonstrada matematicamente, total_position vs fill_size, fragmentação corrigida em 10× fills, cap de outlier 0.25.
 
+### Arquitetura — fund-lock fix + batch + background rate limit
+
+Três correções de **infraestrutura crítica** que impactam fluxo de caixa real e estabilidade de IP:
+
+**1. 🚨 FUND-LOCK FIX — redeem on-chain após resolução.** Bug fatal: quando um mercado resolvia a nosso favor (`won=True`), o bot atualizava o DB e **parava**. Mas Polymarket usa ConditionalTokens (CTF) — tokens vencedores valem 1 USDC face value mas **NÃO transferem automaticamente**. É preciso chamar `ConditionalTokens.redeemPositions(USDC, parentId, conditionId, indexSets)` on-chain. Sem isso, o capital fica preso para sempre no contrato CTF.
+
+Fix:
+- Migration `005_redeem_tx_hash.sql` adiciona coluna `bot_positions.redeem_tx_hash`
+- `resolution_watcher` recebe `CTFClient` e dispara `asyncio.create_task(_dispatch_redeem(...))` quando `won=True`
+- **Idempotência**: sentinel `redeem_tx_hash="dispatching"` reservado via UPDATE atomic `WHERE redeem_tx_hash IS NULL` antes de spawnar a task. Dois ticks consecutivos não disparam 2 redeems
+- Estados rastreados: `NULL` (não dispatchado), `"dispatching"` (em vôo), `"0x<hex>"` (confirmado), `"paper-skip"` (não-live), `"lost-skip"` (perdedora — gas seria desperdício), `"failed:<msg>"` (retry no próximo tick)
+- `indexSet` CTF binary bitmask: outcome 0 → `1`, outcome 1 → `2` (`1 << outcome_idx`)
+- Falha persiste com mensagem; tick subsequente re-tenta
+- Telegram alerta na primeira falha por position
+
+**2. RATE-LIMIT FIX — batch /markets em vez de N requests.** O loop antigo fazia `gamma.get_market(cid, force_refresh=True)` por position aberta. Em 50 positions × tick de 60s = 50 reqs/min bypassando cache → ban Cloudflare/Polymarket.
+
+Fix:
+- Novo `gamma.get_markets_batch(condition_ids: list[str], chunk_size=50)` faz UMA request `/markets?condition_ids=ID1,ID2,...,IDn` por chunk
+- Mira RAM + SQLite cache para todos os markets retornados
+- Dedup case-insensitive de IDs
+- `check_resolutions_once` refatorado: 1 SQL select positions abertas → coleta cids únicos → 1 chamada batch → loop local processa cada position contra dict resolvido → 1 commit DB. Eliminadas N − 1 requests por tick.
+
+**3. ARQUITETURA — `BackgroundRateLimiter` separa hot path de auditoria.** Scanner enriquecendo perfis (22 whales × 3 endpoints = 66 reqs em paralelo) competia pelo MESMO `httpx.AsyncClient` singleton que o post_order do CLOB e a recovery RTDS. Posts de ordem ficavam atrás de fila de auditoria, perdendo ms críticos.
+
+Fix:
+- Novo módulo [src/api/background_limiter.py](src/api/background_limiter.py) com singleton `asyncio.Semaphore` (default 5 concurrent)
+- API `async with bg.acquire(): ...` com timeout 30s + degradação graceful (timeout não bloqueia call, apenas loga)
+- Wraps em `scanner/enrich.py`, `tracker/whale_inventory.py::snapshot_whale`, `executor/resolution_watcher.py` (chamada batch)
+- Hot path (CLOB post_order, RTDS, gamma `get_market` do detect_signal) **NÃO** usa o limiter — sai sem fila. Garantia de que auditoria nunca rouba largura do trading
+- Configurável via `executor.background_max_concurrent` (default 5)
+
+Cobertura: 19 testes novos em [tests/test_resolution_redeem.py](tests/test_resolution_redeem.py) + [tests/test_background_limiter.py](tests/test_background_limiter.py) — indexSet bitmask para binary + multi-outcome, dispatch fire-and-forget, paper-skip / lost-skip / failed retry, sentinel idempotência, batch single call (regression test contra DDoS interno), Semaphore cap concorrência, FIFO serialização, GC pattern em exception, singleton replacement.
+
 ---
 
 ## Performance
@@ -729,6 +763,7 @@ polytrader/
 │   │
 │   ├── api/
 │   │   ├── auth.py                   # EOA L2 prefetch
+│   │   ├── background_limiter.py     # Arquitetura — Semaphore HFT vs auditoria
 │   │   ├── balance.py                # USDC.e on-chain via web3
 │   │   ├── clob_client.py            # CLOB 100% async httpx (post_order HFT)
 │   │   ├── clob_l2_auth.py           # HMAC L2 headers (zero I/O, ~1µs)
@@ -790,7 +825,8 @@ polytrader/
 │   ├── 001_initial.sql               # 9 tabelas + índices
 │   ├── 002_hft_resilience.sql        # tick_size + neg_risk columns
 │   ├── 003_close_reason.sql          # close_reason + realized_pnl em bot_positions
-│   └── 004_arbitrage.sql             # arb_opportunities, arb_executions, bank snaps
+│   ├── 004_arbitrage.sql             # arb_opportunities, arb_executions, bank snaps
+│   └── 005_redeem_tx_hash.sql        # FUND-LOCK FIX — tx hash do redeem on-chain
 │
 ├── scripts/
 │   ├── init_db.py                    # aplica migrations
@@ -814,7 +850,7 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 169 testes em ~9s
+uv run python -m pytest -q               # 188 testes em ~11s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
 uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
@@ -822,6 +858,7 @@ uv run python -m pytest tests/test_hft_hot_path.py -v  # Hot path: HMAC, no disk
 uv run python -m pytest tests/test_trade_event.py tests/test_exit_sync_drift.py tests/test_gamma_ram_cache.py -v  # parsing layer
 uv run python -m pytest tests/test_arbitrage_vwap.py tests/test_gas_oracle.py -v  # VWAP edge + dynamic gas
 uv run python -m pytest tests/test_risk_refactor.py -v  # SELL bypass + Kelly + anti-fragmentação
+uv run python -m pytest tests/test_resolution_redeem.py tests/test_background_limiter.py -v  # FUND-LOCK + batch + bg limiter
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -847,6 +884,8 @@ Cobertura das leis:
 | Quant (VWAP scanner edge math) | `test_arbitrage_vwap.py` |
 | MEV (dynamic gas oracle cascade) | `test_gas_oracle.py` |
 | Risk (SELL bypass + Kelly + fragmentation) | `test_risk_refactor.py` |
+| Arch (FUND-LOCK redeem + batch DDoS fix) | `test_resolution_redeem.py` |
+| Arch (BackgroundRateLimiter HFT vs auditoria) | `test_background_limiter.py` |
 
 ---
 

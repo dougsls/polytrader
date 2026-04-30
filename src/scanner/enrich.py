@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 
+from src.api.background_limiter import get_background_limiter
 from src.api.data_client import DataAPIClient
 from src.core.logger import get_logger
 from src.scanner.profiler import WalletProfile
@@ -34,8 +35,16 @@ class EnrichedMetrics:
 
 
 async def _fetch_json(client: DataAPIClient, path: str, **params: Any) -> Any:
-    """Wrapper para _get privado do DataAPIClient."""
-    return await client._get(path, params=params)  # noqa: SLF001
+    """Wrapper para _get privado do DataAPIClient.
+
+    ⚠️ ARQUITETURA — esta função é o gargalo de auditoria do bot. O
+    `BackgroundRateLimiter` envolve cada call para impedir que o
+    Scanner (22 whales × 3 endpoints = 66 reqs em rajada) compita
+    pelo pool TCP do hot path (post_order, RTDS recovery).
+    """
+    bg = get_background_limiter()
+    async with bg.acquire():
+        return await client._get(path, params=params)  # noqa: SLF001
 
 
 def _is_win(pos: dict) -> bool:
