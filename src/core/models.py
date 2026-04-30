@@ -79,6 +79,14 @@ class TradeSignal(_BaseModel):
     # o payload do RTDS emite `currentSize` — convicção real = posição
     # final desejada / whale_bank.
     whale_total_position_usd: float | None = None
+    # RISK MGMT — Stop-loss em tempo (stale cleanup). Quando True,
+    # copy_engine pula a Regra 1 (Anti-Slippage Anchoring). Usado APENAS
+    # para SELLs sintéticos de stale_cleanup_loop após max_position_age_hours.
+    # Sem isso, posições compradas alto e que despencaram ficam presas
+    # eternamente — Regra 1 calcula slippage=90% e aborta. É um dump-out
+    # forçado pra liberar capital. Spread shield ainda valida (book vazio
+    # ainda aborta). NUNCA setado por sinais reais de copy/arb.
+    bypass_slippage_check: bool = False
 
 
 class CopyTrade(_BaseModel):

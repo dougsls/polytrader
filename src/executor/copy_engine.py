@@ -248,11 +248,21 @@ class CopyEngine:
             await self._mark_skipped(signal, f"RISK: {decision.reason}")
             return None
 
-        # 2. Slippage anchoring — Defensive (REST /book) ou Optimistic (math).
-        # Optimistic Execution: pula o pre-flight, embute tolerance no
-        # limit_price e deixa o CLOB rejeitar via FOK on-exchange.
-        # Economiza ~80-130ms NY→London por trade.
-        if getattr(self._cfg, "optimistic_execution", False):
+        # 2. Slippage anchoring.
+        # ⚠️ DEATH-TRAP FIX: stale_cleanup signals carregam
+        # `bypass_slippage_check=True`. Sinais reais de copy/arb
+        # NUNCA setam isso — Regra 1 segue protegendo contra
+        # comprar caro depois da whale ter movido o book.
+        if signal.bypass_slippage_check:
+            log.warning(
+                "stale_force_sell_bypass_slippage",
+                signal_id=signal.id, token_id=signal.token_id[:12],
+                anchor=signal.price,
+            )
+            ref_price = signal.price
+        elif getattr(self._cfg, "optimistic_execution", False):
+            # Optimistic Execution: pula o pre-flight REST, embute
+            # tolerance no limit_price (economiza ~80-130ms NY→London).
             try:
                 ref_price = compute_optimistic_ref_price(
                     side=signal.side, whale_price=signal.price,

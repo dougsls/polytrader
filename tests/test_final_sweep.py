@@ -189,11 +189,16 @@ async def test_find_stale_respects_age_threshold(tmp_path: Path):
 
 
 def test_synthetic_sell_signal_bypass_confidence():
-    sig = _synthetic_sell_signal("c", "t", "title", "Yes", 10.0, 0.5)
+    # current_price=None testa fallback ao avg_price (compat regressão)
+    sig = _synthetic_sell_signal(
+        "c", "t", "title", "Yes", 10.0, 0.5, current_price=None,
+    )
     assert sig.side == "SELL"
     assert sig.wallet_score == 1.0
     assert sig.wallet_address == "__stale_cleanup__"
     assert sig.id.startswith("stale-")
+    # DEATH-TRAP FIX: bypass garantido em sinal stale
+    assert sig.bypass_slippage_check is True
 
 
 # ---------- H3 — order watchdog terminal detection ----------

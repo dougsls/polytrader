@@ -2,7 +2,7 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **188 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
+Python 3.12+ · 100% async · **203 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
 
 **HFT Mode** (opcional via config): consumidor concorrente de signals, Optimistic Execution sem pre-flight REST, sizing proporcional ao patrimônio da baleia, rollback atômico, **DB INSERT fora do hot path**, **`post_order` 100% async via httpx + HMAC inline**, **WebSocket reconect agressivo + zombie detection**, **`GammaAPIClient` 3-tier cache (RAM 50ns → SQLite 500µs → REST 100ms)**, **`TradeEvent` dataclass com slots**, **drift correction via `currentSize` (full-exit override quando whale zera)**, **VWAP scanner (elimina falso-positivo Top of Book)**, **CTF `AsyncWeb3` nativo (zero `run_in_executor`) + EIP-1559 dinâmico via Polygon Gas Station**.
 
@@ -509,6 +509,29 @@ Fix:
 
 Cobertura: 19 testes novos em [tests/test_resolution_redeem.py](tests/test_resolution_redeem.py) + [tests/test_background_limiter.py](tests/test_background_limiter.py) — indexSet bitmask para binary + multi-outcome, dispatch fire-and-forget, paper-skip / lost-skip / failed retry, sentinel idempotência, batch single call (regression test contra DDoS interno), Semaphore cap concorrência, FIFO serialização, GC pattern em exception, singleton replacement.
 
+### Risk + Infra — stale cleanup death trap fix + price updater paralelo
+
+Duas falhas que afetam liquidação de posições e estabilidade de IP:
+
+**1. 🚨 Stale Cleanup Death Trap** — `_synthetic_sell_signal` antigo usava `avg_entry_price` como anchor de SELL forçado. Em token que despencou (compramos a 0.50, mercado virou 0.05), Regra 1 calculava `slippage = 90%` e abortava — posição ficava presa eternamente, contaminando `portfolio_cap`, `max_positions`, daily_loss tracking. Fix:
+
+- `TradeSignal.bypass_slippage_check: bool = False` adicionado (default preserve behavior). Sinais reais de copy/arb NUNCA setam isso.
+- `_find_stale` passa a SELECT `current_price` da coluna existente (populada pelo `price_updater`).
+- `_synthetic_sell_signal` recebe `current_price` e usa como anchor (fallback ao `avg_price` se ausente). Sempre seta `bypass_slippage_check=True`.
+- `copy_engine._make_decision` checa o flag ANTES de qualquer caminho de slippage (defensive REST `check_slippage_or_abort` ou optimistic). Se True, pula direto pra `ref_price = signal.price`. Loga `stale_force_sell_bypass_slippage` para auditoria.
+- **Spread shield NÃO desligado**: book completamente vazio ainda aborta — só a Regra 1 (anchor whale) é bypassada.
+
+Stale cleanup vira um **stop-loss puro de tempo**: após `max_position_age_hours` (default 48h), a posição é dumpada a qualquer custo de mercado. É a intenção — capital preso é pior que dump em loss conhecida.
+
+**2. ⚙️ Price Updater DDoS sequencial + lock contention** — Loop antigo: 100 positions × `await clob.price()` sequencial (~100ms cada) = **10s blocked**. 100 UPDATEs individuais com lock por write. Fix:
+
+- `asyncio.Semaphore(PRICE_FETCH_CONCURRENCY=10)` + `asyncio.gather` paralelizam fetches → **~1s total** (10× speedup; cap evita rate-limit Polymarket e reserva folga pro hot path)
+- Falha individual num token NÃO contamina os demais (`_fetch_one_price` retorna None em exception, gather coleta apenas successes)
+- `executemany` com lista de tuples `(current, unrealized, pid)` → **1 SQL statement + 1 commit**, eliminando 99 write locks SQLite
+- Hot path `apply_fill` do copy_engine não compete por locks durante a janela
+
+Cobertura: 15 testes novos em [tests/test_stale_cleanup_death_trap.py](tests/test_stale_cleanup_death_trap.py) + [tests/test_price_updater_parallel.py](tests/test_price_updater_parallel.py) — current_price anchor, fallback ao avg, fallback em current zero/negativo, copy_engine bypass integration (mock que falha se `check_slippage_or_abort` for chamado em stale signal), regression check de Regra 1 em sinais normais (bypass=False default), Semaphore cap, paralelização timing (20 fetches × 50ms = ~0.1s, não 1s sequencial), failure isolation, `executemany` UMA chamada não N, sanity zero positions.
+
 ---
 
 ## Performance
@@ -850,7 +873,7 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 188 testes em ~11s
+uv run python -m pytest -q               # 203 testes em ~7s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
 uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
@@ -859,6 +882,7 @@ uv run python -m pytest tests/test_trade_event.py tests/test_exit_sync_drift.py 
 uv run python -m pytest tests/test_arbitrage_vwap.py tests/test_gas_oracle.py -v  # VWAP edge + dynamic gas
 uv run python -m pytest tests/test_risk_refactor.py -v  # SELL bypass + Kelly + anti-fragmentação
 uv run python -m pytest tests/test_resolution_redeem.py tests/test_background_limiter.py -v  # FUND-LOCK + batch + bg limiter
+uv run python -m pytest tests/test_stale_cleanup_death_trap.py tests/test_price_updater_parallel.py -v  # death-trap + paralelo
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -886,6 +910,8 @@ Cobertura das leis:
 | Risk (SELL bypass + Kelly + fragmentation) | `test_risk_refactor.py` |
 | Arch (FUND-LOCK redeem + batch DDoS fix) | `test_resolution_redeem.py` |
 | Arch (BackgroundRateLimiter HFT vs auditoria) | `test_background_limiter.py` |
+| Risk (Stale cleanup death-trap bypass) | `test_stale_cleanup_death_trap.py` |
+| Infra (Price updater paralelo + executemany) | `test_price_updater_parallel.py` |
 
 ---
 
