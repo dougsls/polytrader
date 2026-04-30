@@ -87,6 +87,12 @@ class TradeSignal(_BaseModel):
     # forçado pra liberar capital. Spread shield ainda valida (book vazio
     # ainda aborta). NUNCA setado por sinais reais de copy/arb.
     bypass_slippage_check: bool = False
+    # ⚠️ ALPHA — Convicção via consenso. Quantas wallets distintas do
+    # nosso pool entraram no MESMO (condition_id, side) numa janela de
+    # 15min. 1 = só esta whale (default). 2+ = confluência → RiskManager
+    # amplifica o sizing (até 2x). Captura alpha quando múltiplas mentes
+    # convergem no mesmo edge.
+    confluence_count: int = 1
 
 
 class CopyTrade(_BaseModel):

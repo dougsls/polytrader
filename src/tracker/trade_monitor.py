@@ -22,6 +22,7 @@ from src.core.database import DEFAULT_DB_PATH
 from src.core.logger import get_logger
 from src.core.state import InMemoryState
 from src.core.trade_event import parse_trade_event
+from src.tracker.confluence import ConfluenceTracker
 from src.tracker.signal_detector import detect_signal
 
 log = get_logger(__name__)
@@ -52,6 +53,11 @@ class TradeMonitor:
         # RISK MGMT — win_rate cru por wallet (paralelo a _scores).
         self._win_rates = wallet_win_rates or {}
         self._queue = queue
+        # ⚠️ ALPHA — Confluence tracker (15min window). Conta whales
+        # distintas que convergem no mesmo (cid, side). Conta passa via
+        # `confluence_count` no signal e o RiskManager amplifica sized
+        # até 2× quando há consenso.
+        self._confluence = ConfluenceTracker()
         self._db_path = db_path
         self._conn = conn
         self._state = state
@@ -128,6 +134,15 @@ class TradeMonitor:
         # economizar re-parse, e usamos size/side/current_whale do mesmo
         # parser para o update inline do inventário.
         evt = parse_trade_event(trade)
+        # ⚠️ ALPHA — Confluence: registra esta whale ANTES do detect.
+        # Se 2+ whales distintas em (cid, side) na janela de 15min,
+        # passamos count amplificado pra detect_signal → RiskManager
+        # multiplica sized.
+        confluence_count = 1
+        if evt is not None:
+            confluence_count = self._confluence.record(
+                evt.condition_id, evt.side, evt.wallet,
+            )
         signal = await detect_signal(
             trade=trade,
             wallet_score=self._scores.get(wallet_lower, 0.0),
@@ -136,6 +151,7 @@ class TradeMonitor:
             cfg=self._cfg, gamma=self._gamma, data_client=self._data,
             db_path=self._db_path, conn=self._conn, state=self._state,
             parsed=evt,
+            confluence_count=confluence_count,
         )
         if not signal:
             return

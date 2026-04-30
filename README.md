@@ -2,7 +2,7 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **218 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
+Python 3.12+ · 100% async · **239 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
 
 **HFT Mode** (opcional via config): consumidor concorrente de signals, Optimistic Execution sem pre-flight REST, sizing proporcional ao patrimônio da baleia, rollback atômico, **DB INSERT fora do hot path**, **`post_order` 100% async via httpx + HMAC inline**, **WebSocket reconect agressivo + zombie detection**, **`GammaAPIClient` 3-tier cache (RAM 50ns → SQLite 500µs → REST 100ms)**, **`TradeEvent` dataclass com slots**, **drift correction via `currentSize` (full-exit override quando whale zera)**, **VWAP scanner (elimina falso-positivo Top of Book)**, **CTF `AsyncWeb3` nativo (zero `run_in_executor`) + EIP-1559 dinâmico via Polygon Gas Station**.
 
@@ -560,6 +560,35 @@ Seis bugs sutis que passaram em todas auditorias anteriores. Em conjunto causari
 
 Cobertura: 15 testes novos em [tests/test_production_fixes.py](tests/test_production_fixes.py) — peak update/ignore-stale/bootstrap, drawdown peak-to-trough end-to-end (peak histórico bootstrapped), daily_pnl com realized_24h + unrealized, telegram parse_mode HTML, escape de `<Microsoft>` no título sem quebrar `<b>` template, shared_conn row_factory acesso por nome E tuple unpacking, whale_add increment/clamp/lowercase-merge, tracker inline com fallback delta E com currentSize override, halt/resume gauge metric values.
 
+### Alpha Generation — 5 correções de inteligência (scoring, anti-correlação, confluence)
+
+Cinco bugs sutis na **lógica de negócio** que afetam diretamente a rentabilidade. Não são bugs de infra — são falhas no que define se o bot ganha ou perde dinheiro:
+
+**1. Consistency real (não clone do win_rate).** Antes: `"consistency": profile.win_rate` — fazia o win_rate contar dobrado (peso efetivo 0.20 + 0.15 = 0.35 do score). Inflava artificialmente whales high-win-rate enquanto ignorava whales high-PnL com convicção. Fix: `_consistency_score(total_trades) = min(total_trades / 50, 1.0)` — proxy estatístico de tamanho de amostra. TODO: trocar por Sharpe ratio quando tivermos PnL granular por trade.
+
+**2. Recent Performance gate ("on tilt" detection).** Antes: whale com $100k PnL caindo pra $95k continuava passando em todos gates (≥$500, win_rate≥0.55). Fix:
+- `WalletProfile.recent_pnl_7d: float | None` adicionado
+- `enrich.fetch_metrics` calcula PnL acumulado das closed positions com `ts >= 7 days ago`
+- `score_wallet`: se `recent_pnl_7d < 0`, aplica `score *= 0.3` no final. Penalização severa (não exclusão hard) — quando o tide vira, whale sobe no rank de novo
+
+**3. Anti-correlação (anti-pay-spread-on-both-sides).** Antes: Whale A compra YES + Whale B compra NO no mesmo `condition_id` → bot copia ambos, paga spread dos dois lados, lucro = -fees. Fix:
+- `InMemoryState.condition_to_tokens: dict[cid, set[token]]` mantido em sync via `bot_set/bot_add` com novo kwarg opcional `condition_id`
+- `state.has_conflicting_position(condition_id, token_id) -> bool` — O(1) lookup
+- `apply_fill` em `position_manager` propaga `condition_id` para o write-through
+- `detect_signal` em BUY: se `has_conflicting_position(...)` → rejeita com log `signal_skipped_conflicting_position`. SELL não é bloqueado (exit, não entrada)
+- `reload_from_db` popula o mapping no startup via SELECT
+
+**4. Confluence amplifier (consensus → bigger size).** Antes: cada trade processado isoladamente — bot ignorava sinal de 3 whales convergindo no mesmo (cid, side). Alpha desperdiçado. Fix:
+- Novo módulo [src/tracker/confluence.py](src/tracker/confluence.py) com `ConfluenceTracker(window_seconds=900)`. Janela de 15min por `(condition_id, side)`. API: `record(...) -> int` retorna count de wallets distintas; cleanup automático em cada call
+- `TradeSignal.confluence_count: int = 1` (default 1 = solo)
+- `TradeMonitor` instancia tracker, chama `record(...)` antes do `detect_signal`, propaga `confluence_count` para o signal
+- `RiskManager._size_usd`: `multiplier = 1 + 0.25 * (count - 1)`, capped em 2×. **BUY only** — SELL é exit-driven, não amplifica
+- Aplicado em todos os sizing modes (`fixed`, `proportional`, `kelly`, `whale_proportional`)
+
+**5. `exclude_hyperactive` real (não TODO).** Antes: o bloco `if wt.exclude_hyperactive:` fazia literalmente `pass`. Wash trader com 500 trades/dia em 2 mercados passava no scorer. Fix: `_is_hyperactive(profile)` retorna True se `total_trades / distinct_markets > 50` (>50 trades/mercado em média = wash ou MM, não alpha trader). Score = 0 quando detectado.
+
+Cobertura: 21 testes novos em [tests/test_alpha_fixes.py](tests/test_alpha_fixes.py) — consistency independente do win_rate (regression: high_sample > low_sample), hyperactive detection (3/market vs 100/market), zero-markets safety, recent_pnl penalty 0.3× sob negative E noop sob None/zero, anti-correlação detection/cleanup/bot_add propagation, detect_signal bloqueia BUY conflitante mas permite same-token e SELLs, ConfluenceTracker (1st/2nd/case-insensitive same/separate-sides/eviction/non-mutating count), RiskManager amplifier (1.25× / 1.50× / capped 2×) E NÃO amplifica SELL.
+
 ---
 
 ## Performance
@@ -834,6 +863,7 @@ polytrader/
 │   │   └── wallet_pool.py            # top-N persistido + Set vivo para RTDS
 │   │
 │   ├── tracker/
+│   │   ├── confluence.py             # Alpha — consensus amplifier (15min window)
 │   │   ├── signal_detector.py        # Regra 2 (Exit Syncing) + filtro duração
 │   │   ├── trade_monitor.py          # consume RTDS + dedup + enqueue
 │   │   └── whale_inventory.py        # snapshot /positions → state
@@ -901,7 +931,7 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 218 testes em ~8s
+uv run python -m pytest -q               # 239 testes em ~10s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
 uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
@@ -912,6 +942,7 @@ uv run python -m pytest tests/test_risk_refactor.py -v  # SELL bypass + Kelly + 
 uv run python -m pytest tests/test_resolution_redeem.py tests/test_background_limiter.py -v  # FUND-LOCK + batch + bg limiter
 uv run python -m pytest tests/test_stale_cleanup_death_trap.py tests/test_price_updater_parallel.py -v  # death-trap + paralelo
 uv run python -m pytest tests/test_production_fixes.py -v  # 6 production fixes finais
+uv run python -m pytest tests/test_alpha_fixes.py -v  # 5 alpha generation fixes
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -942,6 +973,7 @@ Cobertura das leis:
 | Risk (Stale cleanup death-trap bypass) | `test_stale_cleanup_death_trap.py` |
 | Infra (Price updater paralelo + executemany) | `test_price_updater_parallel.py` |
 | Production (peak DD + daily PnL + HTML + row_factory + whale RT + halted) | `test_production_fixes.py` |
+| Alpha (scoring + anti-correlação + confluence) | `test_alpha_fixes.py` |
 
 ---
 

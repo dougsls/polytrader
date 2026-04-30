@@ -97,6 +97,7 @@ async def detect_signal(
     whale_portfolio_usd: float | None = None,
     whale_win_rate: float | None = None,
     parsed: TradeEvent | None = None,
+    confluence_count: int = 1,
 ) -> TradeSignal | None:
     """Retorna TradeSignal qualificado ou None se o trade deve ser ignorado.
 
@@ -142,6 +143,20 @@ async def detect_signal(
     if usd_value < cfg.min_trade_size_usd:
         log.info("signal_too_small", usd=usd_value)
         return None
+
+    # --- ⚠️ ALPHA — Anti-correlação (BUY only) --------------------------
+    # Se o bot já tem posição em OUTRO token do mesmo condition_id e a
+    # whale está comprando o token oposto, rejeita: pagar spread em
+    # ambos os lados nos faz neutro com fee loss garantido.
+    # SELL não é bloqueado — é exit, não entrada nova.
+    if side_raw == "BUY" and state is not None:
+        if state.has_conflicting_position(condition_id, token_id):
+            log.info(
+                "signal_skipped_conflicting_position",
+                wallet=wallet, condition_id=condition_id,
+                incoming_token=token_id,
+            )
+            return None
 
     # --- Filtro de duração de mercado -----------------------------------
     market = await gamma.get_market(condition_id)
@@ -309,4 +324,5 @@ async def detect_signal(
         whale_portfolio_usd=whale_portfolio_usd,
         whale_win_rate=whale_win_rate,
         whale_total_position_usd=whale_total_position_usd,
+        confluence_count=confluence_count,
     )

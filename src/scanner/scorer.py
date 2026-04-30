@@ -49,6 +49,38 @@ def _diversity_score(distinct_markets: int) -> float:
     return min((distinct_markets - 1) / 4.0, 1.0)
 
 
+def _consistency_score(total_trades: int) -> float:
+    """Proxy estatístico de consistência: tamanho da amostra.
+
+    Antes: `consistency = win_rate` — clone bug que dobrava o peso de
+    win_rate (0.20 + 0.15 = 0.35 do score). Inflava artificialmente
+    whales high-win-rate enquanto ignorava whales high-PnL com win
+    moderada (que costumam ser as mais lucrativas via convicção).
+
+    Agora: 0–1 baseado em `total_trades / 50`. Whales com mais trades
+    têm dados mais confiáveis = mais "consistentes" estatisticamente.
+
+    TODO: quando tivermos PnL granular por trade, trocar pelo Sharpe
+    ratio real (média/desvio padrão dos retornos).
+    """
+    if total_trades <= 0:
+        return 0.0
+    return min(total_trades / 50.0, 1.0)
+
+
+def _is_hyperactive(profile: WalletProfile) -> bool:
+    """Detecta wash/market-maker: trades por mercado em média.
+
+    >50 trades/mercado é comportamento anômalo em prediction markets:
+    alpha traders entram, esperam resolução, saem (3-10 trades por
+    mercado típico). 100+ trades em 2 mercados = wash ou MM, não alpha.
+    Bot copia alpha; MM é ruído correlacionado com spread.
+    """
+    if profile.distinct_markets <= 0:
+        return False
+    return (profile.total_trades / profile.distinct_markets) > 50
+
+
 def score_wallet(profile: WalletProfile, cfg: ScannerConfig) -> float:
     """Retorna score ∈ [0, 1]. Zero = rejeitada."""
     # --- Gates rígidos ---------------------------------------------------
@@ -68,18 +100,19 @@ def score_wallet(profile: WalletProfile, cfg: ScannerConfig) -> float:
     if wt.enabled and profile.volume_to_pnl_ratio < wt.min_volume_to_pnl_ratio:
         return 0.0
 
-    if wt.exclude_hyperactive:
-        # Heurística: > 100 trades/dia sustentados sem mercados variados
-        # indica wash. Usamos volume_to_pnl como proxy se não tivermos
-        # janela temporal aqui; o gate principal acima já cobre.
-        pass
+    if wt.exclude_hyperactive and _is_hyperactive(profile):
+        # Detectado wash/MM (>50 trades/mercado em média) — score zero.
+        # Bot quer copiar alpha; MM faz volume sem direcional.
+        return 0.0
 
     # --- Componentes normalizados ---------------------------------------
     w: ScoringWeights = cfg.scoring_weights
     components = {
         "pnl": _normalize_pnl(profile.pnl_usd),
         "win_rate": profile.win_rate,
-        "consistency": profile.win_rate,  # proxy: alto win_rate → consistente
+        # ⚠️ ALPHA FIX: consistency NÃO é mais clone do win_rate.
+        # Antes inflava o peso efetivo de win_rate em 0.35 do score.
+        "consistency": _consistency_score(profile.total_trades),
         "recency": _recency_weight(profile.last_trade_at),
         "market_diversity": _diversity_score(profile.distinct_markets),
         "short_term_ratio": profile.short_term_trade_ratio,
@@ -92,4 +125,12 @@ def score_wallet(profile: WalletProfile, cfg: ScannerConfig) -> float:
         + w.market_diversity * components["market_diversity"]
         + w.short_term_ratio * components["short_term_ratio"]
     )
-    return max(0.0, min(score, 1.0))
+    score = max(0.0, min(score, 1.0))
+
+    # --- Item 2: Recent Performance gate ("on tilt" detection) ----------
+    # Whale que está perdendo nas últimas 7 dias é silenciada. Não
+    # exclusão hard (preserva a opção de monitorar) — penalização
+    # severa de 70%. Quando o tide vira, ela sobe no rank de novo.
+    if profile.recent_pnl_7d is not None and profile.recent_pnl_7d < 0:
+        score *= 0.3
+    return score

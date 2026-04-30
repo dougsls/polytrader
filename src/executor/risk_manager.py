@@ -97,10 +97,20 @@ class RiskManager:
     def _size_usd(self, signal: TradeSignal, state: RiskState) -> float:
         mode = self._cfg.sizing_mode
         portfolio = max(state.total_portfolio_value, 1.0)
+        # ⚠️ ALPHA — Confluence amplifier (BUY only).
+        # Quando 2+ whales convergem no mesmo (cid, side) em 15min,
+        # cada confluence_count >1 amplifica o sized em +25%, capped 2×.
+        # SELL é exit-driven (não convicção) → não amplifica.
+        if signal.side == "BUY" and signal.confluence_count > 1:
+            confluence_mult = min(
+                1.0 + 0.25 * (signal.confluence_count - 1), 2.0,
+            )
+        else:
+            confluence_mult = 1.0
         if mode == "fixed":
-            return self._cfg.fixed_size_usd
+            return self._cfg.fixed_size_usd * confluence_mult
         if mode == "proportional":
-            return portfolio * self._cfg.proportional_factor
+            return portfolio * self._cfg.proportional_factor * confluence_mult
         if mode == "kelly":
             # f* = p - q/odds. Odds ≈ (1-price)/price.
             #
@@ -123,7 +133,7 @@ class RiskManager:
             lose = 1 - win
             odds = (1 - price) / price
             kelly = max(win - lose / odds, 0.0)
-            return portfolio * min(kelly, 0.25)
+            return portfolio * min(kelly, 0.25) * confluence_mult
         if mode == "whale_proportional":
             # RISK MGMT — Anti-fragmentação: usa o INVENTÁRIO TOTAL da
             # whale no token (whale_total_position_usd, populado pelo
@@ -140,13 +150,16 @@ class RiskManager:
                 else signal.usd_value
             )
             if whale_bank <= 0 or whale_position_usd <= 0:
-                return portfolio * self._cfg.proportional_factor
+                return portfolio * self._cfg.proportional_factor * confluence_mult
             conviction = whale_position_usd / whale_bank
             # cap hard em 25% do nosso portfolio pra evitar outlier (whale
             # fazendo all-in num trade de lottery)
             conviction_capped = min(conviction, 0.25)
-            return portfolio * conviction_capped * self._cfg.whale_sizing_factor
-        return self._cfg.fixed_size_usd
+            return (
+                portfolio * conviction_capped
+                * self._cfg.whale_sizing_factor * confluence_mult
+            )
+        return self._cfg.fixed_size_usd * confluence_mult
 
     # -- Checklist ----------------------------------------------------------
 

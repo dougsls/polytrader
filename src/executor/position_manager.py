@@ -42,7 +42,9 @@ async def apply_fill(
     """
     if state is not None:
         delta = executed_size if signal.side == "BUY" else -executed_size
-        state.bot_add(signal.token_id, delta)
+        # ⚠️ ALPHA — passa condition_id para manter condition_to_tokens
+        # em sync (anti-correlação no detect_signal).
+        state.bot_add(signal.token_id, delta, condition_id=signal.condition_id)
     now = datetime.now(timezone.utc).isoformat()
 
     async def _do_writes(db: aiosqlite.Connection) -> None:

@@ -19,6 +19,10 @@ class WalletProfile:
     distinct_markets: int
     short_term_trade_ratio: float  # % de trades em mercados < 48h
     last_trade_at: datetime | None
+    # ⚠️ ALPHA — Recent Performance gate. PnL acumulado dos últimos 7
+    # dias. None = não-enriched (compat retroativa). Negativo = whale
+    # "on tilt" → scorer aplica 0.3× penalty pra silenciá-la temporariamente.
+    recent_pnl_7d: float | None = None
 
     @property
     def volume_to_pnl_ratio(self) -> float:

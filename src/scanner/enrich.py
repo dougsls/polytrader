@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from src.api.background_limiter import get_background_limiter
@@ -32,6 +32,9 @@ class EnrichedMetrics:
     total_trades: int
     distinct_markets: int
     last_trade_at: datetime | None
+    # ⚠️ ALPHA — PnL acumulado das closed positions dos últimos 7 dias.
+    # None se sem dados; negativo dispara penalty no scorer (item 2).
+    recent_pnl_7d: float | None = None
 
 
 async def _fetch_json(client: DataAPIClient, path: str, **params: Any) -> Any:
@@ -89,14 +92,21 @@ async def fetch_metrics(
     losses = 0
     markets: set[str] = set()
     last_ts = 0
+    # ⚠️ ALPHA — janela 7d para detectar whales "on tilt".
+    seven_days_ago_ts = (
+        datetime.now(timezone.utc) - timedelta(days=7)
+    ).timestamp()
+    recent_pnl = 0.0
+    has_recent_data = False
     if isinstance(closed, list):
         for pos in closed:
             if not isinstance(pos, dict):
                 continue
             try:
-                pnl_usd += float(pos.get("realizedPnl") or 0)
+                pnl_pos = float(pos.get("realizedPnl") or 0)
             except (TypeError, ValueError):
-                pass
+                pnl_pos = 0.0
+            pnl_usd += pnl_pos
             if _is_win(pos):
                 wins += 1
             else:
@@ -107,6 +117,10 @@ async def fetch_metrics(
             ts = pos.get("timestamp") or 0
             if isinstance(ts, (int, float)) and ts > last_ts:
                 last_ts = int(ts)
+            # Acumula PnL das últimas 7 dias APENAS se ts >= cutoff.
+            if isinstance(ts, (int, float)) and ts >= seven_days_ago_ts:
+                recent_pnl += pnl_pos
+                has_recent_data = True
 
     total_closed = wins + losses
     win_rate = (wins / total_closed) if total_closed > 0 else 0.0
@@ -122,6 +136,9 @@ async def fetch_metrics(
         total_trades=total_trades,
         distinct_markets=len(markets),
         last_trade_at=last_trade_at,
+        # None quando sem dados da janela; só ativa o gate quando há
+        # dados reais pra avaliar (não pune whale com 0 trades em 7d).
+        recent_pnl_7d=recent_pnl if has_recent_data else None,
     )
 
 
@@ -152,6 +169,8 @@ async def enrich_profiles(
             total_trades=res.total_trades,
             distinct_markets=res.distinct_markets,
             last_trade_at=res.last_trade_at or p.last_trade_at,
+            # ⚠️ ALPHA — propaga PnL recente para o scorer gate "on tilt"
+            recent_pnl_7d=res.recent_pnl_7d,
             # short_term_trade_ratio: mantemos estimativa inicial
         ))
     return out

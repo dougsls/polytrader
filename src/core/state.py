@@ -34,23 +34,60 @@ class InMemoryState:
     def __init__(self) -> None:
         self.bot_positions_by_token: dict[str, float] = {}
         self.whale_inventory: dict[tuple[str, str], float] = {}
+        # ⚠️ ALPHA — Anti-correlação. Mapeia condition_id → set de tokens
+        # que o bot detém abertos. Permite detectar conflito (bot tem YES,
+        # whale compra NO no mesmo mercado) em O(1) no detect_signal.
+        # Sem isso, bot pagaria spread dos dois lados pra ficar neutro.
+        self.condition_to_tokens: dict[str, set[str]] = {}
 
     # --- Bot positions ---------------------------------------------------
 
     def bot_size(self, token_id: str) -> float:
         return self.bot_positions_by_token.get(token_id, 0.0)
 
-    def bot_set(self, token_id: str, size: float) -> None:
+    def bot_set(
+        self, token_id: str, size: float, *, condition_id: str | None = None,
+    ) -> None:
+        """Atualiza posição do bot. Quando `condition_id` é fornecido,
+        mantém o mapping `condition_to_tokens` em sync (necessário para
+        o anti-correlação gate em `detect_signal`)."""
         if size <= 0:
             self.bot_positions_by_token.pop(token_id, None)
+            # Remove o token do set do condition; cleanup se vazio.
+            if condition_id is not None:
+                tokens = self.condition_to_tokens.get(condition_id)
+                if tokens is not None:
+                    tokens.discard(token_id)
+                    if not tokens:
+                        self.condition_to_tokens.pop(condition_id, None)
         else:
             self.bot_positions_by_token[token_id] = size
+            if condition_id is not None:
+                self.condition_to_tokens.setdefault(condition_id, set()).add(token_id)
 
-    def bot_add(self, token_id: str, delta: float) -> float:
-        """Retorna o novo size. Remove se <= 0."""
+    def bot_add(
+        self, token_id: str, delta: float, *, condition_id: str | None = None,
+    ) -> float:
+        """Retorna o novo size. Remove se <= 0.
+
+        `condition_id` opcional para manter `condition_to_tokens` em sync
+        (anti-correlação). `apply_fill` passa; outros callers podem omitir.
+        """
         new = self.bot_positions_by_token.get(token_id, 0.0) + delta
-        self.bot_set(token_id, new)
+        self.bot_set(token_id, new, condition_id=condition_id)
         return new
+
+    def has_conflicting_position(self, condition_id: str, token_id: str) -> bool:
+        """⚠️ ALPHA — True se o bot já tem posição em OUTRO token do mesmo
+        condition_id. Usado pelo `detect_signal` em BUY: se tivermos YES
+        aberto e a whale comprar NO, rejeita o sinal pra evitar pagar
+        spread dos dois lados (bot ficaria neutro com loss garantida).
+        """
+        tokens = self.condition_to_tokens.get(condition_id)
+        if not tokens:
+            return False
+        # Conflito = há OUTRO token (≠ token_id passado) com size>0.
+        return any(tk != token_id for tk in tokens)
 
     # --- Whale inventory -------------------------------------------------
     # wallet é sempre armazenado lowercase. Os callers podem passar
@@ -98,13 +135,19 @@ class InMemoryState:
         async def _load(db: aiosqlite.Connection) -> None:
             self.bot_positions_by_token.clear()
             self.whale_inventory.clear()
+            self.condition_to_tokens.clear()
+            # ⚠️ ALPHA — bootstrap do anti-correlação mapping também.
+            # SELECT inclui condition_id pra montar condition_to_tokens.
             async with db.execute(
-                "SELECT token_id, SUM(size) FROM bot_positions "
-                "WHERE is_open=1 GROUP BY token_id"
+                "SELECT token_id, condition_id, SUM(size) "
+                "FROM bot_positions WHERE is_open=1 "
+                "GROUP BY token_id, condition_id"
             ) as cur:
-                async for tok, sz in cur:
+                async for tok, cid, sz in cur:
                     if sz and sz > 0:
                         self.bot_positions_by_token[tok] = float(sz)
+                        if cid:
+                            self.condition_to_tokens.setdefault(cid, set()).add(tok)
             async with db.execute(
                 "SELECT wallet_address, token_id, size FROM whale_inventory"
             ) as cur:
