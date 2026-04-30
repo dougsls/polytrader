@@ -2,9 +2,9 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **119 testes** · ruff limpo · SQLite com WAL · web3.py para CTF · stack leve (~80 deps)
+Python 3.12+ · 100% async · **139 testes** · ruff limpo · SQLite com WAL · web3.py para CTF · stack leve (~80 deps)
 
-**HFT Mode** (opcional via config): consumidor concorrente de signals (`asyncio.Semaphore`), Optimistic Execution sem pre-flight REST `/book`, sizing proporcional ao patrimônio da baleia, rollback atômico de arb com FOK, **DB INSERT fora do hot path (fire-and-forget)**, **`post_order` 100% async via httpx + HMAC inline (zero `run_in_executor` no caminho de envio)**, **WebSocket reconect agressivo (50-150ms jitter) + zombie detection (3s silence threshold)**.
+**HFT Mode** (opcional via config): consumidor concorrente de signals, Optimistic Execution sem pre-flight REST, sizing proporcional ao patrimônio da baleia, rollback atômico, **DB INSERT fora do hot path**, **`post_order` 100% async via httpx + HMAC inline**, **WebSocket reconect agressivo + zombie detection**, **`GammaAPIClient` 3-tier cache (RAM 50ns → SQLite 500µs → REST 100ms)**, **`TradeEvent` dataclass com slots (~30% mais rápido que `dict.get` cascata)**, **drift correction via `currentSize` do payload (full-exit override quando whale zera)**.
 
 > ⚠️ **Aviso.** Copy-trading de mercados de predição envolve risco real de perda de capital. Este projeto é infraestrutura — não um conselho financeiro. Opere em `paper` por 7-14 dias antes de `live`, e mesmo em live comece com 10% do capital-alvo. Leia a seção [Segurança e Modos de Operação](#segurança-e-modos-de-operação).
 
@@ -379,6 +379,33 @@ Ver [src/api/heartbeat.py](src/api/heartbeat.py) e [src/api/websocket_client.py]
 
 Cobertura: 10 testes novos em [tests/test_hft_hot_path.py](tests/test_hft_hot_path.py) — paridade HMAC com SDK oficial, build_draft sem disk I/O, `persist_trade_async` idempotente, silence detection trigger/reset/disabled.
 
+### Camada de parsing & estado — `dict.get` → slots, SQLite → RAM
+
+Três refatorações que removem custos invisíveis no hot path do `detect_signal` (chamado a cada trade RTDS — pico ~3k msgs/s, dos quais ~1% sobrevive ao filtro Set):
+
+**1. `GammaAPIClient` 3-tier cache.** Antes, `get_market(condition_id)` fazia SELECT no SQLite (~500µs) a cada trade. Agora a pirâmide de latência é:
+
+```
+L1 RAM (OrderedDict, ~50ns)  →  L2 SQLite (~500µs)  →  L3 REST Gamma (~100ms)
+```
+
+`OrderedDict` permite eviction LRU O(1) via `popitem(last=False)`; cap de 1024 entradas com TTL 300s por entrada (mesmo TTL do SQLite cache). Hits são monotonic-clock-safe, evictar TTL-expired no read. SQLite hit promove pra RAM (próximas leituras viram L1). `_write_cache` mira RAM antes do disco. Métricas `hits/misses/size` expostas via `ram_stats`. Em workload steady (~500 condition_ids ativos), >99% das chamadas viram L1 hits após warm-up.
+
+**2. Drift correction no Whale Inventory.** A Lei 2 antiga calculava `pct_sold = min(size / prior_whale, 1.0)` — vulnerável a `prior_whale` defasado por missed packet RTDS, AMM split/merge ou crash do bot. Refactor:
+
+- Quando o payload contém `currentSize` (saldo da whale APÓS o trade — Polymarket emite em alguns canais), usa **delta exato**: `pct_sold = (prior - current) / prior`. Imune a drift.
+- Caso especial **whale zerou** (`current == 0`): `adjusted_size = bot_size` — vendemos TUDO, ignorando o `size` do evento (que pode ser parcial vs evento final consolidado).
+- Após cada SELL com payload válido, `state.whale_set(wallet, token, current)` sincroniza nosso RAM com o ground truth do payload — corrige drift cumulativo automaticamente.
+- Fallback: se `currentSize` ausente, comportamento legado preservado.
+
+Helper puro `_compute_exit_size` retorna `(adjusted_size, pct_sold, source)` onde `source ∈ {"event_close", "event_delta", "size_proxy"}` — auditável nos logs `exit_sync_resize`.
+
+**3. `TradeEvent` dataclass com slots.** O `detect_signal` antes fazia 10+ `dict.get(...)` em cascata por evento. Refactor: novo módulo [src/core/trade_event.py](src/core/trade_event.py) com `@dataclass(frozen=True, slots=True)` `TradeEvent` + função pura `parse_trade_event(raw)`. UMA única passada extrai todos os campos com fallback chains documentadas (`maker → makerAddress → user`, `currentSize → balanceAfter → postSize → makerBalance`, etc.). Atributos slot lookup ~30% mais rápido que `dict.get`; sem alocação de `__dict__`. Bug de canto corrigido: `or` chain falha quando valor é `0` falsy (justamente o caso crítico `currentSize=0`) — substituído por cascata `is None` explícita.
+
+`detect_signal` aceita parâmetro opcional `parsed: TradeEvent` para callers já-parsed (futuro: pre-parse no `websocket_client` antes de empurrar pra fila — economia adicional). Callers existentes seguem passando `dict` sem mudança.
+
+Cobertura: 20 testes novos em [tests/test_trade_event.py](tests/test_trade_event.py), [tests/test_exit_sync_drift.py](tests/test_exit_sync_drift.py), [tests/test_gamma_ram_cache.py](tests/test_gamma_ram_cache.py) — parser paridade RTDS+API, 3 caminhos de `_compute_exit_size`, full-exit override quando whale zera, drift correction integration, LRU eviction, TTL drop, SQLite→RAM promotion.
+
 ---
 
 ## Performance
@@ -628,7 +655,8 @@ polytrader/
 │   │   ├── logger.py                 # structlog JSON → journalctl
 │   │   ├── models.py                 # Pydantic v2 models
 │   │   ├── quantize.py               # Diretiva 1 (Decimal)
-│   │   └── state.py                  # Fase 4: InMemoryState RAM cache
+│   │   ├── state.py                  # Fase 4: InMemoryState RAM cache
+│   │   └── trade_event.py            # HFT — slots dataclass + parser (~30% faster)
 │   │
 │   ├── api/
 │   │   ├── auth.py                   # EOA L2 prefetch
@@ -636,7 +664,7 @@ polytrader/
 │   │   ├── clob_client.py            # CLOB 100% async httpx (post_order HFT)
 │   │   ├── clob_l2_auth.py           # HMAC L2 headers (zero I/O, ~1µs)
 │   │   ├── data_client.py            # Data API (leaderboard/positions/trades)
-│   │   ├── gamma_client.py           # Gamma API + market_metadata_cache
+│   │   ├── gamma_client.py           # Gamma API 3-tier cache (RAM/SQLite/REST)
 │   │   ├── heartbeat.py              # Diretiva 3 + zombie detection (3s silence)
 │   │   ├── http.py                   # httpx AsyncClient singleton (HTTP/2)
 │   │   ├── order_builder.py          # Diretivas 1+4 aplicadas
@@ -716,11 +744,12 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 119 testes em ~12s
+uv run python -m pytest -q               # 139 testes em ~8s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
 uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
 uv run python -m pytest tests/test_hft_hot_path.py -v  # Hot path: HMAC, no disk I/O, zombie WS
+uv run python -m pytest tests/test_trade_event.py tests/test_exit_sync_drift.py tests/test_gamma_ram_cache.py -v  # parsing layer
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -740,6 +769,9 @@ Cobertura das leis:
 | HFT (Optimistic Exec) | `test_optimistic_execution.py` |
 | HFT (Concurrent engine) | `test_concurrent_engine.py` |
 | HFT (Hot path: HMAC + zombie WS) | `test_hft_hot_path.py` |
+| HFT (TradeEvent parser) | `test_trade_event.py` |
+| HFT (Exit sync drift correction) | `test_exit_sync_drift.py` |
+| HFT (Gamma 3-tier RAM cache) | `test_gamma_ram_cache.py` |
 
 ---
 

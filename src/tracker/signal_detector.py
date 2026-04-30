@@ -1,16 +1,19 @@
 """Detecção e qualificação de sinais de copy-trading.
 
 Responsabilidades (nesta ordem):
-  1. Construir TradeSignal a partir de um trade bruto (polling ou RTDS).
+  1. Parse UNA VEZ via `parse_trade_event` (HFT — sub-µs slot access).
   2. Aplicar filtro de idade (signal_max_age_seconds).
   3. Aplicar filtro de tamanho mínimo (min_trade_size_usd).
   4. Aplicar **filtro de duração de mercado** (end_date via gamma).
   5. **Regra 2 — Exit Syncing:** para SELL, verificar:
        a. bot possui o token em `bot_positions` (is_open=1). Se não,
           skip com reason="NO_POSITION_TO_SELL".
-       b. calcular o tamanho proporcional ao % que a baleia vendeu
-          (delta do whale_inventory). O sinal carrega esse tamanho
-          ajustado em vez do tamanho cru do trade.
+       b. calcular tamanho proporcional. Quando o payload contém
+          `currentSize` (saldo da whale pós-trade), usa isso pra
+          calcular pct_sold real — imune a drift do RAM cache. Se
+          whale zerou (current=0): close TUDO da nossa posição.
+       c. Drift correction: state.whale_set(current) atualiza nossa
+          visão do inventário da whale com o ground-truth do payload.
 """
 from __future__ import annotations
 
@@ -30,9 +33,48 @@ from src.core.database import DEFAULT_DB_PATH, get_connection
 from src.core.logger import get_logger
 from src.core.models import TradeSignal
 from src.core.state import InMemoryState
+from src.core.trade_event import TradeEvent, parse_trade_event
 
 _signal_counter = count(0)
 log = get_logger(__name__)
+
+
+def _compute_exit_size(
+    *,
+    size: float,
+    prior_whale: float,
+    bot_size: float,
+    current_whale: float | None,
+) -> tuple[float, float, str]:
+    """Calcula (adjusted_size, pct_sold, source) para Exit Syncing.
+
+    Função pura sem I/O — testável isoladamente.
+
+    Prioridade de fontes (HFT — drift correction):
+      1. `current_whale == 0` → whale zerou; close TUDO (`bot_size`)
+      2. `current_whale > 0` → exato: pct = (prior - current) / prior
+      3. `current_whale is None` → fallback legado: pct = size/prior
+
+    Returns:
+        (adjusted_size, pct_sold, source) onde source ∈ {"event_close",
+        "event_delta", "size_proxy"} para auditoria nos logs.
+    """
+    if current_whale is not None and current_whale <= 0.0:
+        # Whale zerou — full exit. Override matemático do `size` cru
+        # (que pode ser parcial e perdemos eventos anteriores).
+        return bot_size, 1.0, "event_close"
+
+    if current_whale is not None and current_whale > 0.0 and prior_whale > 0.0:
+        # Delta REAL do evento. Imune a drift no `prior_whale`.
+        # max(0) defende contra current > prior (whale comprou e nosso
+        # prior_whale ficou pequeno demais por missed packet).
+        delta = max(0.0, prior_whale - current_whale)
+        pct = min(delta / prior_whale, 1.0)
+        return bot_size * pct, pct, "event_delta"
+
+    # Fallback legado — sem ground truth do payload.
+    pct = min(size / prior_whale, 1.0)
+    return bot_size * pct, pct, "size_proxy"
 
 
 def _hours_to_resolution(end_date_iso: str | None) -> float | None:
@@ -53,16 +95,27 @@ async def detect_signal(
     conn: aiosqlite.Connection | None = None,
     state: InMemoryState | None = None,
     whale_portfolio_usd: float | None = None,
+    parsed: TradeEvent | None = None,
 ) -> TradeSignal | None:
     """Retorna TradeSignal qualificado ou None se o trade deve ser ignorado.
 
     Logs um motivo quando filtra (auditoria).
+
+    HFT — parser opcional: caller pode passar `parsed` já pronto pra
+    economizar uma re-parse. Se None, fazemos uma única passada via
+    `parse_trade_event` (slots dataclass, sub-µs).
     """
     now = datetime.now(timezone.utc)
 
-    # --- Idade -----------------------------------------------------------
-    ts = trade.get("timestamp") or trade.get("time") or trade.get("t")
-    if ts:
+    # HFT — parse UNA VEZ via dataclass com slots (~30% mais rápido que
+    # cascata de `.get()`. zero alocação extra de dict).
+    evt = parsed if parsed is not None else parse_trade_event(trade)
+    if evt is None:
+        return None
+
+    # --- Idade — reutiliza evt.timestamp (sem refazer .get) ------------
+    if evt.timestamp is not None:
+        ts = evt.timestamp
         trade_dt = (
             datetime.fromtimestamp(int(ts), tz=timezone.utc)
             if isinstance(ts, (int, float))
@@ -75,18 +128,15 @@ async def detect_signal(
     else:
         trade_dt = now
 
-    # --- Campos obrigatórios --------------------------------------------
-    wallet_raw = trade.get("maker") or trade.get("makerAddress") or trade.get("user")
-    # Normaliza para lowercase — TARGET_WHALES + state + DB usam lower.
-    wallet = wallet_raw.lower() if wallet_raw else None
-    condition_id = trade.get("conditionId") or trade.get("condition_id")
-    token_id = trade.get("asset") or trade.get("tokenId") or trade.get("token_id")
-    side_raw = (trade.get("side") or "").upper()
-    if not (wallet and condition_id and token_id and side_raw in ("BUY", "SELL")):
-        return None
-    size = float(trade.get("size") or trade.get("amount") or 0)
-    price = float(trade.get("price") or 0)
-    usd_value = size * price if price > 0 else float(trade.get("usdSize") or 0)
+    # Campos críticos já validados pelo parser — extrai pra locals
+    # (slot lookup mais barato que repetir evt.field N vezes em hot path).
+    wallet = evt.wallet
+    condition_id = evt.condition_id
+    token_id = evt.token_id
+    side_raw = evt.side
+    size = evt.size
+    price = evt.price
+    usd_value = evt.usd_value
 
     if usd_value < cfg.min_trade_size_usd:
         log.info("signal_too_small", usd=usd_value)
@@ -127,6 +177,22 @@ async def detect_signal(
                 return None
 
     # --- Regra 2: Exit Syncing para SELL --------------------------------
+    # HFT — Drift Correction (asymmetry fix):
+    # Quando o payload trade contém `currentSize` (saldo da whale APÓS
+    # o trade), o cálculo de pct_sold é matematicamente exato — imune
+    # a drift do `prior_whale` em RAM (que pode estar defasado por
+    # missed packet RTDS, AMM split/merge, ou crash do bot anterior).
+    #
+    #   pct_sold_exact = (prior_whale - current_whale) / prior_whale
+    #
+    # Caso especial: current_whale == 0 → whale ZEROU. Nossa posição
+    # também deve ir a zero (`adjusted_size = bot_size`), independente
+    # do `size` reportado no evento (que pode ser parcial vs evento
+    # final consolidado de close-all).
+    #
+    # Fallback (current_whale ausente): comportamento legado
+    # `pct_sold = min(size / prior_whale, 1.0)` — vulnerável a drift
+    # mas era o único disponível antes.
     adjusted_size = size
     if side_raw == "SELL":
         # Fase 4 — Fast path: in-memory state cache (< 1μs vs ~500μs SQLite).
@@ -140,12 +206,19 @@ async def detect_signal(
             if prior_whale <= 0:
                 log.info("exit_sync_no_whale_snapshot", wallet=wallet, token=token_id)
                 return None
-            pct_sold = min(size / prior_whale, 1.0)
-            adjusted_size = bot_size * pct_sold
+            adjusted_size, pct_sold, source = _compute_exit_size(
+                size=size, prior_whale=prior_whale, bot_size=bot_size,
+                current_whale=evt.current_whale_size,
+            )
+            # Drift correction — atualiza state com ground truth do evento.
+            # Próximo SELL desta whale neste token usa o saldo REAL.
+            if evt.current_whale_size is not None:
+                state.whale_set(wallet, token_id, evt.current_whale_size)
             log.info(
                 "exit_sync_resize",
                 whale_sold_pct=pct_sold, bot_size=bot_size,
-                adjusted_size=adjusted_size, source="ram",
+                adjusted_size=adjusted_size, source=source,
+                current_whale=evt.current_whale_size,
             )
         else:
             # Fallback DB — usado por tests que ainda não injetam state.
@@ -178,12 +251,15 @@ async def detect_signal(
             if prior_whale <= 0:
                 log.info("exit_sync_no_whale_snapshot", wallet=wallet, token=token_id)
                 return None
-            pct_sold = min(size / prior_whale, 1.0)
-            adjusted_size = bot_size * pct_sold
+            adjusted_size, pct_sold, source = _compute_exit_size(
+                size=size, prior_whale=prior_whale, bot_size=bot_size,
+                current_whale=evt.current_whale_size,
+            )
             log.info(
                 "exit_sync_resize",
                 whale_sold_pct=pct_sold, bot_size=bot_size,
-                adjusted_size=adjusted_size, source="db",
+                adjusted_size=adjusted_size, source=f"db+{source}",
+                current_whale=evt.current_whale_size,
             )
 
     market_title = market.get("question") or market.get("title") or ""

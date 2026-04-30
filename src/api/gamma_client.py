@@ -1,15 +1,24 @@
-"""Polymarket Gamma API — metadados de mercado com cache.
+"""Polymarket Gamma API — metadados de mercado, cache 3-tier.
+
+HFT — pirâmide de latências:
+    L1: RAM (OrderedDict, ~50ns hit)        → hot path
+    L2: SQLite WAL (~500µs hit, durável)    → warm path / restart
+    L3: REST Gamma API (~80-130ms NY→London) → cold path
+
+`get_market` desce essa pirâmide em sequência: RAM → SQLite → REST.
+Cada miss faz write-through pra camada acima. O resultado: o
+`detect_signal` (chamado a cada trade do RTDS) faz lookup O(1) na
+RAM em ~99% dos casos depois do warm-up.
 
 Responsabilidades:
   1. Buscar mercado por condition_id (`end_date_iso`, `expiration`, tokens).
   2. Extrair `tick_size` (Diretiva 1) e `neg_risk` (Diretiva 4).
-  3. Gravar em market_metadata_cache com TTL (padrão 300s).
-
-O cache é fundamental: o Tracker chama gamma em cada sinal para aplicar
-o filtro de duração de mercado. Sem cache, 1 trade/seg = 3600 chamadas/h.
+  3. Cachear em RAM + SQLite com TTL (padrão 300s).
 """
 from __future__ import annotations
 
+import time
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +35,10 @@ log = get_logger(__name__)
 
 DEFAULT_BASE_URL = "https://gamma-api.polymarket.com"
 DEFAULT_TTL_SECONDS = 300
+# Cap do RAM cache. Polymarket raramente tem >500 mercados ativos
+# simultâneos; 1024 dá folga de 2x sem virar memory hog (cada entry
+# ~2KB = ~2MB total no pior caso).
+RAM_CACHE_MAX_SIZE = 1024
 
 
 class GammaAPIClient:
@@ -38,6 +51,13 @@ class GammaAPIClient:
         self._base = base_url.rstrip("/")
         self._db_path = db_path
         self._ttl = ttl_seconds
+        # HFT — RAM cache (L1). Chave = condition_id, valor = (market_dict,
+        # monotonic_fetched_at). monotonic é safe contra ajuste de relógio.
+        # OrderedDict permite eviction LRU O(1) via popitem(last=False).
+        self._ram_cache: OrderedDict[str, tuple[dict[str, Any], float]] = OrderedDict()
+        # Métricas internas (low-overhead, lidas pelo dashboard se quiser).
+        self._ram_hits = 0
+        self._ram_misses = 0
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         client = await get_http_client()
@@ -56,6 +76,45 @@ class GammaAPIClient:
                 endpoint=path, status=resp.status_code, detail=resp.text[:500],
             )
         return orjson.loads(resp.content)
+
+    # --- RAM cache (L1) — O(1) lookup, microsegundos -------------------- #
+
+    def _ram_get(self, condition_id: str) -> dict[str, Any] | None:
+        """RAM hit ou None. NUNCA toca disco. Síncrono, sub-µs."""
+        entry = self._ram_cache.get(condition_id)
+        if entry is None:
+            self._ram_misses += 1
+            return None
+        market, fetched_at = entry
+        if (time.monotonic() - fetched_at) > self._ttl:
+            # TTL expirou — drop e força revalidação.
+            self._ram_cache.pop(condition_id, None)
+            self._ram_misses += 1
+            return None
+        # LRU: move pro fim (mais recente). O(1) na OrderedDict.
+        self._ram_cache.move_to_end(condition_id)
+        self._ram_hits += 1
+        return market
+
+    def _ram_set(self, condition_id: str, market: dict[str, Any]) -> None:
+        """Escreve em RAM com eviction LRU se cap atingido."""
+        self._ram_cache[condition_id] = (market, time.monotonic())
+        self._ram_cache.move_to_end(condition_id)
+        # Eviction quando passa do cap — drop o mais antigo (front).
+        while len(self._ram_cache) > RAM_CACHE_MAX_SIZE:
+            self._ram_cache.popitem(last=False)
+
+    @property
+    def ram_stats(self) -> dict[str, int]:
+        """Hits/misses para o dashboard. Total = hits + misses."""
+        return {
+            "hits": self._ram_hits,
+            "misses": self._ram_misses,
+            "size": len(self._ram_cache),
+            "max_size": RAM_CACHE_MAX_SIZE,
+        }
+
+    # --- SQLite cache (L2) — warm path, persiste reboots --------------- #
 
     async def _read_cache(self, condition_id: str) -> dict[str, Any] | None:
         now = datetime.now(timezone.utc)
@@ -117,6 +176,9 @@ class GammaAPIClient:
         ]
 
     async def _write_cache(self, condition_id: str, market: dict[str, Any]) -> None:
+        # Mirror em RAM ANTES do disco — hot path tem o dado mesmo se
+        # o INSERT atrasar (ex: WAL contention sob load).
+        self._ram_set(condition_id, market)
         now = datetime.now(timezone.utc).isoformat()
         market["tokens"] = self._normalize_tokens(market)
         tokens_json = orjson.dumps(market["tokens"]).decode()
@@ -205,10 +267,19 @@ class GammaAPIClient:
         return out
 
     async def get_market(self, condition_id: str, *, force_refresh: bool = False) -> dict[str, Any]:
+        # HFT — pirâmide 3-tier: RAM (~50ns) → SQLite (~500µs) → REST (~100ms).
         if not force_refresh:
+            # L1 — RAM hot path. Nenhum I/O, sub-microsegundo.
+            ram_hit = self._ram_get(condition_id)
+            if ram_hit is not None:
+                return ram_hit
+            # L2 — SQLite warm path. Sobrevive a restart do processo.
             cached = await self._read_cache(condition_id)
             if cached:
+                # Promove pra RAM — próximas chamadas serão L1 hits.
+                self._ram_set(condition_id, cached)
                 return cached
+        # L3 — REST cold path.
         # Gamma 2026: filter é `condition_ids` (plural); `condition_id` é ignorado.
         data = await self._get("/markets", params={"condition_ids": condition_id})
         market: dict[str, Any] | None = None
