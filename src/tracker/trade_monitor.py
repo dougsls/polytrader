@@ -21,6 +21,7 @@ from src.core.config import TrackerConfig
 from src.core.database import DEFAULT_DB_PATH
 from src.core.logger import get_logger
 from src.core.state import InMemoryState
+from src.core.trade_event import parse_trade_event
 from src.tracker.signal_detector import detect_signal
 
 log = get_logger(__name__)
@@ -110,13 +111,23 @@ class TradeMonitor:
             await self._conn.commit()
 
     async def _enqueue_trade(self, trade: dict, source: str) -> None:
-        """Fluxo comum: dedup → detect_signal → enqueue com backpressure."""
+        """Fluxo comum: dedup → detect_signal → enqueue com backpressure.
+
+        ⚠️ WHALE INVENTORY EM TEMPO REAL — após enqueue bem-sucedido,
+        atualiza `state.whale_inventory` inline com o delta deste trade.
+        Antes, o inventário só era atualizado pelo Scanner a cada 60min;
+        Exit Sync calculava proporção em dados defasados de 1h.
+        """
         key = self._dedup_key(trade)
         if key in self._seen:
             return
         self._remember(key)
         wallet = key[0]
         wallet_lower = wallet.lower() if wallet else ""
+        # Parse uma vez aqui — passamos `parsed` para detect_signal
+        # economizar re-parse, e usamos size/side/current_whale do mesmo
+        # parser para o update inline do inventário.
+        evt = parse_trade_event(trade)
         signal = await detect_signal(
             trade=trade,
             wallet_score=self._scores.get(wallet_lower, 0.0),
@@ -124,6 +135,7 @@ class TradeMonitor:
             whale_win_rate=self._win_rates.get(wallet_lower),
             cfg=self._cfg, gamma=self._gamma, data_client=self._data,
             db_path=self._db_path, conn=self._conn, state=self._state,
+            parsed=evt,
         )
         if not signal:
             return
@@ -145,6 +157,19 @@ class TradeMonitor:
                             dropped_id=dropped.id, kept_id=signal.id)
             except (asyncio.QueueEmpty, asyncio.QueueFull):
                 metrics.signals_dropped.inc()
+
+        # === WHALE INVENTORY UPDATE INLINE ===========================
+        # Após enqueue, sincroniza o state RAM com o delta do trade.
+        # Prioridade:
+        #   1. current_whale_size do payload (saldo pós-trade — exato).
+        #   2. delta do fill: BUY → +size, SELL → -size.
+        # whale_set/whale_add já clampam ≥0 (pop quando ≤0).
+        if self._state is not None and evt is not None:
+            if evt.current_whale_size is not None and evt.current_whale_size >= 0:
+                self._state.whale_set(evt.wallet, evt.token_id, evt.current_whale_size)
+            else:
+                delta = evt.size if evt.side == "BUY" else -evt.size
+                self._state.whale_add(evt.wallet, evt.token_id, delta)
 
     async def run_polling(self, active_wallets: set[str]) -> None:
         """Fallback: polling /trades?user=ADDR a cada poll_interval_seconds.

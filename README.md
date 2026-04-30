@@ -2,7 +2,7 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **203 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
+Python 3.12+ · 100% async · **218 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
 
 **HFT Mode** (opcional via config): consumidor concorrente de signals, Optimistic Execution sem pre-flight REST, sizing proporcional ao patrimônio da baleia, rollback atômico, **DB INSERT fora do hot path**, **`post_order` 100% async via httpx + HMAC inline**, **WebSocket reconect agressivo + zombie detection**, **`GammaAPIClient` 3-tier cache (RAM 50ns → SQLite 500µs → REST 100ms)**, **`TradeEvent` dataclass com slots**, **drift correction via `currentSize` (full-exit override quando whale zera)**, **VWAP scanner (elimina falso-positivo Top of Book)**, **CTF `AsyncWeb3` nativo (zero `run_in_executor`) + EIP-1559 dinâmico via Polygon Gas Station**.
 
@@ -532,6 +532,34 @@ Stale cleanup vira um **stop-loss puro de tempo**: após `max_position_age_hours
 
 Cobertura: 15 testes novos em [tests/test_stale_cleanup_death_trap.py](tests/test_stale_cleanup_death_trap.py) + [tests/test_price_updater_parallel.py](tests/test_price_updater_parallel.py) — current_price anchor, fallback ao avg, fallback em current zero/negativo, copy_engine bypass integration (mock que falha se `check_slippage_or_abort` for chamado em stale signal), regression check de Regra 1 em sinais normais (bypass=False default), Semaphore cap, paralelização timing (20 fetches × 50ms = ~0.1s, não 1s sequencial), failure isolation, `executemany` UMA chamada não N, sanity zero positions.
 
+### Production fixes — 6 correções finais (drawdown, daily PnL, HTML, row_factory, inventário, gauge)
+
+Seis bugs sutis que passaram em todas auditorias anteriores. Em conjunto causariam circuit breakers que **nunca disparam**, mensagens cruas no Telegram, e Exit Sync com dados defasados de 1h:
+
+**1. Drawdown REAL com peak tracking.** Antes: `(invested - current) / invested` calculava só loss vs entrada — não é drawdown (que é peak-to-trough). Resultado: portfolio que cresce 50% e depois cai 30% mostrava DD=0% se ainda estava acima do invested. Fix:
+- `BalanceCache.note_portfolio_value()` mantém o pico em RAM, atualiza só quando cache é fresh + valor positivo (defesa contra outliers)
+- `BalanceCache.bootstrap_peak()` lê `MAX(total_portfolio_value)` de `risk_snapshots` no startup — sobrevive restart
+- `build_risk_state` calcula `current_dd = (peak - portfolio_value) / peak`. Circuit breaker `max_drawdown_pct` agora dispara corretamente
+
+**2. Daily PnL real.** Antes: `daily_pnl = unrealized` (ignorava perdas realizadas das 24h). Resultado: `max_daily_loss_usd` **nunca disparava** em dia ruim de SELLs. Fix: a query `daily_realized` já existia (variável local em `_query`); separamos do `realized_lifetime` e somamos com `unrealized` no campo correto: `daily_pnl = daily_realized + unrealized`.
+
+**3. Telegram parse_mode HTML + sanitize.** Antes: `<b>BUY</b>` aparecia cru no Telegram (sem `parse_mode="HTML"`). Pior: títulos com `<` ou `>` quebravam o parse após o fix, fazendo a mensagem inteira falhar. Fix:
+- `_send` adiciona `parse_mode="HTML"`
+- `notify_trade`/`notify_skip`/`notify_risk` aplicam `html.escape()` em `market_title`, `outcome`, `wallet_address` (campos USER-PROVIDED). Tags template (`<b>`, `<i>`) ficam intactas
+
+**4. `open_shared_connection.row_factory`.** Antes: shared_conn não setava `row_factory`. Workarounds tipo `hasattr(row, "keys")` em `position_sync.py` mascaravam o bug — código que tentava acessar por nome (`row["realized_pnl"]`) caía silenciosamente no caminho legacy. Fix: `conn.row_factory = aiosqlite.Row` logo após `aiosqlite.connect()`. Compatível com tuple unpacking.
+
+**5. Whale inventory em tempo real.** Antes: snapshot só rodava no Scanner.tick (a cada 60min). Entre scans, Exit Sync calculava proporção de SELL com `prior_whale` defasado de 1h. Fix:
+- `InMemoryState.whale_add(wallet, token_id, delta)` espelha o `bot_add` que já existia
+- `TradeMonitor._enqueue_trade` atualiza state inline APÓS enqueue:
+  - `current_whale_size` no payload disponível → `state.whale_set(...)` (overrides drift cumulativo)
+  - Senão fallback: BUY → `+size`, SELL → `-size` via `whale_add`
+- Drift cap: ao próximo Scanner.tick (60min), snapshot completo re-sincroniza
+
+**6. Prometheus halted gauge.** Antes: gauge `polytrader_halted` definido em metrics mas nunca atualizado. Grafana/Alertmanager não viam halts. Fix: `RiskManager.halt()` chama `metrics.halted.set(1)`; `resume()` chama `metrics.halted.set(0)`.
+
+Cobertura: 15 testes novos em [tests/test_production_fixes.py](tests/test_production_fixes.py) — peak update/ignore-stale/bootstrap, drawdown peak-to-trough end-to-end (peak histórico bootstrapped), daily_pnl com realized_24h + unrealized, telegram parse_mode HTML, escape de `<Microsoft>` no título sem quebrar `<b>` template, shared_conn row_factory acesso por nome E tuple unpacking, whale_add increment/clamp/lowercase-merge, tracker inline com fallback delta E com currentSize override, halt/resume gauge metric values.
+
 ---
 
 ## Performance
@@ -873,7 +901,7 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 203 testes em ~7s
+uv run python -m pytest -q               # 218 testes em ~8s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
 uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
@@ -883,6 +911,7 @@ uv run python -m pytest tests/test_arbitrage_vwap.py tests/test_gas_oracle.py -v
 uv run python -m pytest tests/test_risk_refactor.py -v  # SELL bypass + Kelly + anti-fragmentação
 uv run python -m pytest tests/test_resolution_redeem.py tests/test_background_limiter.py -v  # FUND-LOCK + batch + bg limiter
 uv run python -m pytest tests/test_stale_cleanup_death_trap.py tests/test_price_updater_parallel.py -v  # death-trap + paralelo
+uv run python -m pytest tests/test_production_fixes.py -v  # 6 production fixes finais
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -912,6 +941,7 @@ Cobertura das leis:
 | Arch (BackgroundRateLimiter HFT vs auditoria) | `test_background_limiter.py` |
 | Risk (Stale cleanup death-trap bypass) | `test_stale_cleanup_death_trap.py` |
 | Infra (Price updater paralelo + executemany) | `test_price_updater_parallel.py` |
+| Production (peak DD + daily PnL + HTML + row_factory + whale RT + halted) | `test_production_fixes.py` |
 
 ---
 

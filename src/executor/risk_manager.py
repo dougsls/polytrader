@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from src.core import metrics
 from src.core.config import ExecutorConfig
 from src.core.logger import get_logger
 from src.core.models import RiskState, TradeSignal
@@ -54,12 +55,16 @@ class RiskManager:
     def halt(self, reason: str) -> None:
         self._halted = True
         self._halt_reason = reason
+        # Prometheus gauge — Grafana/Alertmanager consomem isto pra
+        # disparar alertas externos quando o bot vai pra halt.
+        metrics.halted.set(1)
         log.error("risk_halted", reason=reason)
 
     def resume(self) -> None:
         self._halted = False
         self._halt_reason = None
         self._consecutive_post_fails = 0
+        metrics.halted.set(0)
 
     @property
     def is_halted(self) -> bool:

@@ -3,10 +3,16 @@
 Guard: se `token` ou `chat_id` vazios, todas as mensagens viram no-op
 (log warning). Permite rodar em dev sem credenciais. Em produção na
 VPS, configure .env e reinicie.
+
+⚠️ HTML PARSE — `_send` agora dispara com parse_mode="HTML". Templates
+usam `<b>`, `<i>` etc. Campos vindos de fonte externa (market_title,
+outcome, wallet_address) passam por html.escape() para evitar que
+títulos com `<` ou `>` quebrem o parse e a mensagem inteira falhe.
 """
 from __future__ import annotations
 
 import asyncio
+import html
 from typing import Any
 
 from src.core.logger import get_logger
@@ -32,7 +38,9 @@ class TelegramNotifier:
             return
         try:
             await self._bot.send_message(
-                chat_id=self._chat_id, text=text, disable_notification=silent,
+                chat_id=self._chat_id, text=text,
+                disable_notification=silent,
+                parse_mode="HTML",
             )
         except Exception as exc:  # noqa: BLE001 — nunca derrubar executor
             log.warning("telegram_send_failed", err=repr(exc))
@@ -43,22 +51,29 @@ class TelegramNotifier:
 
     def notify_trade(self, signal: TradeSignal, trade: CopyTrade) -> asyncio.Task[None]:
         emoji = "🟢" if signal.side == "BUY" else "🔴"
+        # Sanitize campos USER-PROVIDED — títulos podem ter <, >, & que
+        # quebrariam o parse HTML do Telegram. Strings template (<b>...) ficam.
+        title_safe = html.escape(signal.market_title[:60])
+        outcome_safe = html.escape(signal.outcome)
+        wallet_safe = html.escape(signal.wallet_address[:10])
         text = (
-            f"{emoji} <b>{signal.side}</b> {signal.market_title[:60]}\n"
-            f"Outcome: {signal.outcome} @ {trade.intended_price:.4f}\n"
+            f"{emoji} <b>{signal.side}</b> {title_safe}\n"
+            f"Outcome: {outcome_safe} @ {trade.intended_price:.4f}\n"
             f"Size: {trade.intended_size:.2f} (${trade.intended_size * trade.intended_price:.2f})\n"
-            f"Whale: {signal.wallet_address[:10]}… (score {signal.wallet_score:.2f})\n"
+            f"Whale: {wallet_safe}… (score {signal.wallet_score:.2f})\n"
             f"Hours-to-res: {signal.hours_to_resolution:.1f}h"
             if signal.hours_to_resolution is not None else
-            f"{emoji} <b>{signal.side}</b> {signal.market_title[:60]} @ {trade.intended_price:.4f}"
+            f"{emoji} <b>{signal.side}</b> {title_safe} @ {trade.intended_price:.4f}"
         )
         return self.notify(text)
 
     def notify_risk(self, reason: str) -> asyncio.Task[None]:
-        return self.notify(f"⚠️ RISK ALERT: {reason}")
+        return self.notify(f"⚠️ RISK ALERT: {html.escape(reason)}")
 
     def notify_skip(self, signal: TradeSignal, reason: str) -> asyncio.Task[None]:
+        title_safe = html.escape(signal.market_title[:50])
+        reason_safe = html.escape(reason)
         return self.notify(
-            f"⏭️ SKIP {signal.side} {signal.market_title[:50]} — {reason}",
+            f"⏭️ SKIP {signal.side} {title_safe} — {reason_safe}",
             silent=True,
         )

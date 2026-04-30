@@ -280,6 +280,19 @@ async def amain() -> None:
 
     balance_cache = BalanceCache(balance_fetcher)
 
+    # ⚠️ Drawdown peak bootstrap — recupera o pico histórico do portfolio
+    # de risk_snapshots para sobreviver restart sem zerar o tracker de DD.
+    try:
+        async with shared_conn.execute(
+            "SELECT COALESCE(MAX(total_portfolio_value), 0) FROM risk_snapshots"
+        ) as _cur:
+            _row = await _cur.fetchone()
+        if _row and _row[0]:
+            balance_cache.bootstrap_peak(float(_row[0]))
+            log.info("peak_portfolio_bootstrapped", peak=float(_row[0]))
+    except Exception as exc:  # noqa: BLE001 — não bloquear startup
+        log.warning("peak_bootstrap_failed", err=repr(exc))
+
     # --- executor ---------------------------------------------------------
     risk = RiskManager(settings.config.executor)
 

@@ -66,6 +66,24 @@ class InMemoryState:
         else:
             self.whale_inventory[key] = size
 
+    def whale_add(self, wallet: str, token_id: str, delta: float) -> float:
+        """Atualiza inventário em tempo real APÓS detectar trade da whale.
+
+        Espelha `bot_add` — usado pelo TradeMonitor inline em
+        `_enqueue_trade`. Sem isso, whale_inventory dependeria do snapshot
+        do Scanner (a cada 60min) e o Exit Sync calcularia proporção
+        baseada em dados defasados.
+
+        BUY da whale → delta positivo (acumula).
+        SELL da whale → delta negativo (reduz).
+
+        Resultado clampado em ≥0 via `whale_set` (que pop quando ≤0).
+        Retorna o novo size.
+        """
+        new = self.whale_inventory.get((wallet.lower(), token_id), 0.0) + delta
+        self.whale_set(wallet, token_id, new)
+        return max(new, 0.0)
+
     # --- Sync ------------------------------------------------------------
 
     async def reload_from_db(

@@ -22,13 +22,22 @@ STALE_THRESHOLD_SECONDS = 60.0
 
 
 class BalanceCache:
-    """Cache em RAM do saldo USDC disponível para o bot."""
+    """Cache em RAM do saldo USDC disponível para o bot.
+
+    Também mantém o **peak portfolio value** (RAM, sobrevive bootstrap
+    via `risk_snapshots`) — usado pelo `build_risk_state` para calcular
+    drawdown CORRETO (peak-to-trough) em vez de loss instantâneo.
+    """
 
     def __init__(self, fetch_balance: Callable[[], Awaitable[float]]) -> None:
         self._fetch = fetch_balance
         self._balance_usdc: float = 0.0
         self._updated_at: datetime | None = None
         self._stop = asyncio.Event()
+        # Peak portfolio value — atualizado externamente via
+        # `note_portfolio_value`. Bootstrap em main.py via SELECT MAX(...)
+        # de risk_snapshots para sobreviver restart.
+        self._peak_portfolio_value: float = 0.0
 
     @property
     def balance_usdc(self) -> float:
@@ -68,3 +77,30 @@ class BalanceCache:
         if self._updated_at is None:
             return None
         return datetime.now(timezone.utc) - self._updated_at
+
+    # --- Peak portfolio tracking (drawdown correto) ----------------------
+
+    @property
+    def peak_portfolio_value(self) -> float:
+        return self._peak_portfolio_value
+
+    def note_portfolio_value(self, value: float) -> float:
+        """Marca observação de portfolio_value e atualiza o peak se for
+        novo máximo. Retorna o peak atual.
+
+        Drawdown correto = (peak - current) / peak — mas para isso, peak
+        precisa refletir o MAIOR valor já observado, NÃO um snapshot
+        instantâneo da entrada.
+
+        Defesa: só registra valores positivos e quando balance cache está
+        fresh; outliers de cache stale (balance=0) não viciam o peak.
+        """
+        if value > 0 and self.is_fresh and value > self._peak_portfolio_value:
+            self._peak_portfolio_value = value
+        return self._peak_portfolio_value
+
+    def bootstrap_peak(self, peak: float) -> None:
+        """Inicializa peak no startup via SELECT MAX(total_portfolio_value)
+        em risk_snapshots. Sobrevive restart sem perder o histórico."""
+        if peak > self._peak_portfolio_value:
+            self._peak_portfolio_value = peak

@@ -62,8 +62,13 @@ async def open_shared_connection(
 
     Aplica os mesmos pragmas de `get_connection` — hot path writers
     (tracker/executor) herdam synchronous=NORMAL + cache 16MB.
+
+    ⚠️ row_factory = aiosqlite.Row — sem isso, código que acessa
+    resultados por nome (`row["realized_pnl"]`) falha silenciosamente
+    em workarounds tipo `hasattr(row, "keys")`.
     """
     conn = await aiosqlite.connect(db_path)
+    conn.row_factory = aiosqlite.Row
     await conn.execute("PRAGMA foreign_keys=ON;")
     await conn.execute("PRAGMA wal_autocheckpoint=500;")
     await conn.execute("PRAGMA synchronous=NORMAL;")
