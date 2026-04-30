@@ -2,9 +2,9 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **139 testes** · ruff limpo · SQLite com WAL · web3.py para CTF · stack leve (~80 deps)
+Python 3.12+ · 100% async · **155 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
 
-**HFT Mode** (opcional via config): consumidor concorrente de signals, Optimistic Execution sem pre-flight REST, sizing proporcional ao patrimônio da baleia, rollback atômico, **DB INSERT fora do hot path**, **`post_order` 100% async via httpx + HMAC inline**, **WebSocket reconect agressivo + zombie detection**, **`GammaAPIClient` 3-tier cache (RAM 50ns → SQLite 500µs → REST 100ms)**, **`TradeEvent` dataclass com slots (~30% mais rápido que `dict.get` cascata)**, **drift correction via `currentSize` do payload (full-exit override quando whale zera)**.
+**HFT Mode** (opcional via config): consumidor concorrente de signals, Optimistic Execution sem pre-flight REST, sizing proporcional ao patrimônio da baleia, rollback atômico, **DB INSERT fora do hot path**, **`post_order` 100% async via httpx + HMAC inline**, **WebSocket reconect agressivo + zombie detection**, **`GammaAPIClient` 3-tier cache (RAM 50ns → SQLite 500µs → REST 100ms)**, **`TradeEvent` dataclass com slots**, **drift correction via `currentSize` (full-exit override quando whale zera)**, **VWAP scanner (elimina falso-positivo Top of Book)**, **CTF `AsyncWeb3` nativo (zero `run_in_executor`) + EIP-1559 dinâmico via Polygon Gas Station**.
 
 > ⚠️ **Aviso.** Copy-trading de mercados de predição envolve risco real de perda de capital. Este projeto é infraestrutura — não um conselho financeiro. Opere em `paper` por 7-14 dias antes de `live`, e mesmo em live comece com 10% do capital-alvo. Leia a seção [Segurança e Modos de Operação](#segurança-e-modos-de-operação).
 
@@ -406,6 +406,47 @@ Helper puro `_compute_exit_size` retorna `(adjusted_size, pct_sold, source)` ond
 
 Cobertura: 20 testes novos em [tests/test_trade_event.py](tests/test_trade_event.py), [tests/test_exit_sync_drift.py](tests/test_exit_sync_drift.py), [tests/test_gamma_ram_cache.py](tests/test_gamma_ram_cache.py) — parser paridade RTDS+API, 3 caminhos de `_compute_exit_size`, full-exit override quando whale zera, drift correction integration, LRU eviction, TTL drop, SQLite→RAM promotion.
 
+### Quant + MEV — VWAP edge + AsyncWeb3 nativo + gas dinâmico
+
+Última milha. Duas correções mergeantes para o motor de execução on-chain:
+
+**1. VWAP scanner (correção matemática crítica).** O `_depth_usd` antigo retornava `(best_price, depth_total)` e o scanner usava `best_price` como input do edge: `edge = 1 - (best_yes + best_no)`. Isso é **falso-positivo manufaturado**: se o L1 do book tem $5 e queremos $500, vamos consumir L2/L3 a preços piores → execução real diverge do edge estimado, FOK reverte ou capital fica preso.
+
+A nova função pura `_walk_vwap(book, side, target_tokens, max_levels)` caminha o livro nível-a-nível consumindo liquidez até preencher o `target_tokens`. Retorna o **VWAP real** do path:
+
+```
+VWAP = Σ(price_i × tokens_taken_i) / Σ(tokens_taken_i)
+```
+
+`_evaluate_market` agora faz **2-pass**:
+1. **Depth survey** (`target=∞`): descobre `depth_yes_tokens` / `depth_no_tokens` totais
+2. **Resolve**: `effective_target = min(max_per_op_usd / best_l1, depth_yes, depth_no) × 0.5`
+3. Re-walk com `effective_target` → `vwap_yes`, `vwap_no` realistas
+4. `edge_gross = 1 - (vwap_yes + vwap_no)` ← VWAP, **não** best_ask
+
+`ArbOpportunity.ask_yes`/`ask_no` agora carregam VWAP (semântica explícita: "preço efetivo de execução do tamanho recomendado"). Mantém compat de schema.
+
+Cenário canônico do bug: L1 30¢ + 30¢ = aparente 40% edge. Mas L1 só tem 10 tokens; pra 100 tokens consumimos 10@0.30 + 90@0.45 = VWAP 0.435 → edge real **13%**. Antes da correção, scanner emitiria. Agora bloqueia.
+
+**2. CTF `AsyncWeb3` nativo + EIP-1559 dinâmico.** Dois bugs HFT:
+
+a) `loop.run_in_executor(None, self._merge_sync, ...)` prendia uma thread do default `ThreadPoolExecutor` por até 60s no `wait_for_transaction_receipt`. Default tem ~32 threads — em rajada de arb, esgota.
+
+b) `max_priority = 30 gwei` hardcoded. Em volatilidade (peak MEV), median priority na Polygon ultrapassa 50-100 gwei → tx cai do bloco / sofre MEV-sandwich.
+
+Refactor:
+- `Web3(HTTPProvider)` → `AsyncWeb3(AsyncHTTPProvider)` no `_ensure_initialized` (lazy init thread-safe via `asyncio.Lock`)
+- Merge/redeem viram corotinas puras; todas as chamadas RPC são `await w3.eth.*`. `wait_for_transaction_receipt` da `AsyncWeb3` usa `asyncio.sleep` interno — não prende thread alguma
+- Signing continua inline (`Account.sign_transaction` é CPU puro keccak+ECDSA, ~1ms)
+- Novo módulo [src/arbitrage/gas_oracle.py](src/arbitrage/gas_oracle.py) com cascata:
+  - **L1**: Polygon Gas Station v2 (`fast.maxPriorityFee` em gwei)
+  - **L2**: `eth_feeHistory` percentil 99 dos últimos 20 blocos (mediana inter-blocos)
+  - **L3**: hardcoded 30 gwei (preserva default histórico)
+  - Cache TTL 5s + cap defensivo de 500 gwei contra outliers
+- `maxFeePerGas = baseFee × 2 + maxPriorityFee` (2× baseFee como buffer contra spike entre estimação e inclusão)
+
+Cobertura: 16 testes novos em [tests/test_arbitrage_vwap.py](tests/test_arbitrage_vwap.py) + [tests/test_gas_oracle.py](tests/test_gas_oracle.py) — VWAP math (5 cenários), false-positive elimination, scanner integration, gas oracle cascade (gas station / fee_history / hardcoded / cap / cache TTL / object-attr access).
+
 ---
 
 ## Performance
@@ -694,8 +735,9 @@ polytrader/
 │   │
 │   ├── arbitrage/                    # Track A — engine matemática paralela
 │   │   ├── models.py                 # ArbOpportunity, ArbLegFill, ArbExecution
-│   │   ├── scanner.py                # sweep YES+NO < 1 + depth filter
-│   │   ├── ctf_client.py             # web3 mergePositions/redeemPositions
+│   │   ├── scanner.py                # VWAP sweep YES+NO < 1 (2-pass)
+│   │   ├── ctf_client.py             # AsyncWeb3 nativo + EIP-1559 dinâmico
+│   │   ├── gas_oracle.py             # Polygon Gas Station + fee_history p99
 │   │   └── executor.py               # FOK paralelo + rollback + auto-merge
 │   │
 │   └── notifier/
@@ -744,12 +786,13 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 139 testes em ~8s
+uv run python -m pytest -q               # 155 testes em ~12s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
 uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
 uv run python -m pytest tests/test_hft_hot_path.py -v  # Hot path: HMAC, no disk I/O, zombie WS
 uv run python -m pytest tests/test_trade_event.py tests/test_exit_sync_drift.py tests/test_gamma_ram_cache.py -v  # parsing layer
+uv run python -m pytest tests/test_arbitrage_vwap.py tests/test_gas_oracle.py -v  # VWAP edge + dynamic gas
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -772,6 +815,8 @@ Cobertura das leis:
 | HFT (TradeEvent parser) | `test_trade_event.py` |
 | HFT (Exit sync drift correction) | `test_exit_sync_drift.py` |
 | HFT (Gamma 3-tier RAM cache) | `test_gamma_ram_cache.py` |
+| Quant (VWAP scanner edge math) | `test_arbitrage_vwap.py` |
+| MEV (dynamic gas oracle cascade) | `test_gas_oracle.py` |
 
 ---
 

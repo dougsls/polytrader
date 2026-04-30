@@ -1,12 +1,26 @@
 """Arbitrage scanner — varre mercados continuamente buscando YES+NO < 1.
 
+QUANT — VWAP-based edge (corrige falso-positivo do Top of Book):
+
+  Antes: edge_gross = 1 - (best_ask_yes + best_ask_no). PROBLEMA: o
+  best_ask cobre só o L1 do book; um lote de $500 em book com $5 no
+  L1 consome L2/L3 a preços piores → execução real diverge do edge
+  estimado, FOK reverte ou capital fica preso.
+
+  Agora: edge_gross = 1 - (vwap_yes + vwap_no). O VWAP é calculado
+  caminhando o livro nível-a-nível até preencher o tamanho ALVO da
+  arbitragem. É o preço médio REAL de execução. Falsos positivos
+  causados por book raso são eliminados na origem.
+
 Algoritmo:
-  1. Lista mercados ativos via Gamma (paginação, filtra duração)
-  2. Para cada mercado binário (2 outcomes), busca best ask de YES e NO
-  3. Calcula edge bruto = 1 - (ask_yes + ask_no)
-  4. Calcula edge líquido = bruto - fees - safety_buffer
-  5. Mede profundidade de book em cada side
-  6. Se edge_net >= min_edge_pct AND depth >= min_book_depth → emite ArbOpportunity
+  1. Lista mercados ativos via Gamma (paginação, filtra duração).
+  2. Para cada mercado binário (2 outcomes), busca o livro de YES+NO.
+  3. **Estimate pass**: walk infinito → descobre depth_total_tokens.
+  4. **Resolve pass**: target = min(max_per_op_usd / best_combined,
+     depth_yes, depth_no). Re-walk → vwap_yes, vwap_no.
+  5. edge_gross = 1 - (vwap_yes + vwap_no).
+  6. edge_net = edge_gross - 2×fee - safety_buffer.
+  7. Se edge_net >= min_edge_pct AND fill ≥ min_book_depth_usd → emite.
 
 A oportunidade é serializada em arb_opportunities (status=pending) e
 empurrada para a queue do executor. Scanner não posta ordens — apenas
@@ -35,10 +49,10 @@ _BOOK_FETCH_CONCURRENCY = 20
 
 
 def _depth_usd(book: dict[str, Any], side: str, max_levels: int) -> tuple[float, float]:
-    """Retorna (best_price, depth_usd) para um lado do book.
+    """[DEPRECATED — kept for backward compat com tests legados]
 
-    `side="asks"` (compra) ou `side="bids"` (venda). Soma `size * price`
-    em até `max_levels` níveis. Retorna (0, 0) se book vazio.
+    Retorna (best_price, depth_usd_total). Para edge calculation usar
+    `_walk_vwap` que retorna VWAP correto por target_size.
 
     Polymarket book schema: {"bids": [{"price": "0.32", "size": "150"}, ...],
                              "asks": [{"price": "0.34", "size": "120"}, ...]}
@@ -46,8 +60,6 @@ def _depth_usd(book: dict[str, Any], side: str, max_levels: int) -> tuple[float,
     levels = book.get(side) or []
     if not levels:
         return (0.0, 0.0)
-    # Asks: ascending price (best = lowest). Bids: descending (best = highest).
-    # Polymarket retorna os arrays já ordenados; defensive sort here:
     parsed = [(float(lvl["price"]), float(lvl["size"])) for lvl in levels[:max_levels]]
     if side == "asks":
         parsed.sort(key=lambda x: x[0])
@@ -56,6 +68,73 @@ def _depth_usd(book: dict[str, Any], side: str, max_levels: int) -> tuple[float,
     best_price = parsed[0][0]
     depth = sum(p * s for p, s in parsed)
     return (best_price, depth)
+
+
+def _best_ask_l1(book: dict[str, Any]) -> float:
+    """L1 ask — preço mais baixo no lado de venda. 0.0 se vazio."""
+    asks = book.get("asks") or []
+    if not asks:
+        return 0.0
+    # Polymarket retorna sorted asc; defensive min().
+    return min(float(a["price"]) for a in asks)
+
+
+def _walk_vwap(
+    book: dict[str, Any],
+    side: str,
+    target_tokens: float,
+    max_levels: int,
+) -> tuple[float, float, float, int]:
+    """Walk no order book consumindo liquidez até `target_tokens`.
+
+    QUANT — núcleo da correção de edge:
+      Para um lote de N tokens, o preço efetivo é o VWAP do path:
+        VWAP = sum(price_i × tokens_taken_i) / sum(tokens_taken_i)
+      Onde `tokens_taken_i = min(level_size_i, remaining)` para cada
+      nível percorrido. Se o L1 não enche, vai pro L2 com preço pior.
+
+    Args:
+        book: schema Polymarket {"bids": [...], "asks": [...]}.
+        side: "asks" para BUY, "bids" para SELL.
+        target_tokens: quantos tokens queremos preencher. Use float("inf")
+            para discovery do depth total.
+        max_levels: cap em níveis percorridos. Limita queue tail
+            ilíquida (defensive contra books com 50+ níveis poeira).
+
+    Returns:
+        (vwap, fillable_tokens, depth_usd_consumed, levels_used)
+        - vwap: preço médio do path. 0.0 se book vazio.
+        - fillable_tokens: efetivamente preenchível ≤ target.
+        - depth_usd_consumed: vwap × fillable_tokens.
+        - levels_used: níveis percorridos.
+    """
+    levels = book.get(side) or []
+    if not levels:
+        return (0.0, 0.0, 0.0, 0)
+    parsed = [(float(lvl["price"]), float(lvl["size"])) for lvl in levels[:max_levels]]
+    # Asks: ascending (best = lowest). Bids: descending (best = highest).
+    if side == "asks":
+        parsed.sort(key=lambda x: x[0])
+    else:
+        parsed.sort(key=lambda x: -x[0])
+
+    remaining = target_tokens
+    consumed_tokens = 0.0
+    consumed_usd = 0.0
+    levels_used = 0
+    for price, size in parsed:
+        if remaining <= 0:
+            break
+        take = size if size <= remaining else remaining
+        consumed_tokens += take
+        consumed_usd += take * price
+        remaining -= take
+        levels_used += 1
+
+    if consumed_tokens <= 0:
+        return (0.0, 0.0, 0.0, 0)
+    vwap = consumed_usd / consumed_tokens
+    return (vwap, consumed_tokens, consumed_usd, levels_used)
 
 
 class ArbScanner:
@@ -151,37 +230,85 @@ class ArbScanner:
                 log.debug("arb_book_failed", cond_id=cond_id, err=repr(exc))
                 return None
 
-        ask_yes, depth_yes = _depth_usd(book_yes, "asks", max_levels=5)
-        ask_no, depth_no = _depth_usd(book_no, "asks", max_levels=5)
-
-        if ask_yes <= 0 or ask_no <= 0:
+        # === QUANT — VWAP-based edge =====================================
+        # Pass 1 (depth survey): walk infinito → descobre depth total
+        # disponível em tokens. Este `vwap` retornado é o VWAP COMPLETO
+        # do livro (não usado para edge — só pra log/debug).
+        max_lv = 5
+        _, depth_yes_tokens, depth_yes_usd, _ = _walk_vwap(
+            book_yes, "asks", target_tokens=float("inf"), max_levels=max_lv,
+        )
+        _, depth_no_tokens, depth_no_usd, _ = _walk_vwap(
+            book_no, "asks", target_tokens=float("inf"), max_levels=max_lv,
+        )
+        # Best L1 (top of book) — usado APENAS para estimar quantos
+        # tokens cabem em max_per_op_usd no melhor cenário possível.
+        best_l1_yes = _best_ask_l1(book_yes)
+        best_l1_no = _best_ask_l1(book_no)
+        if best_l1_yes <= 0 or best_l1_no <= 0:
             return None  # sem ofertas em algum lado
+        if depth_yes_tokens <= 0 or depth_no_tokens <= 0:
+            return None
 
-        edge_gross = 1.0 - (ask_yes + ask_no)
-        # 2 legs ⇒ 2× fee_per_leg. + safety_buffer.
+        # Pass 2 (resolve): target em tokens limitado por max_per_op_usd
+        # (calculado ao MELHOR PREÇO L1 como upper bound otimista) E pelo
+        # depth real em cada side.
+        upper_target_tokens = self.cfg.max_per_op_usd / (best_l1_yes + best_l1_no)
+        effective_target = min(upper_target_tokens, depth_yes_tokens, depth_no_tokens)
+        # 50% do depth do lado mais raso — conservador, deixa folga pra
+        # outras execuções concorrentes não consumirem o book inteiro.
+        effective_target *= 0.5
+        if effective_target <= 0:
+            return None
+
+        # Re-walk com o tamanho efetivo → VWAP REAL de execução.
+        vwap_yes, fillable_yes, cost_yes_usd, lv_yes = _walk_vwap(
+            book_yes, "asks", target_tokens=effective_target, max_levels=max_lv,
+        )
+        vwap_no, fillable_no, cost_no_usd, lv_no = _walk_vwap(
+            book_no, "asks", target_tokens=effective_target, max_levels=max_lv,
+        )
+        # Sanity — algum lado pode ter encolhido entre os 2 walks (paranoia)
+        if vwap_yes <= 0 or vwap_no <= 0 or fillable_yes <= 0 or fillable_no <= 0:
+            return None
+
+        # Edge baseado em VWAP, não em best_ask. Isso elimina o falso
+        # positivo: se L1 era ilusório, vwap reflete o consumo real.
+        edge_gross = 1.0 - (vwap_yes + vwap_no)
         edge_net = edge_gross - (2 * self.cfg.fee_per_leg) - self.cfg.safety_buffer_pct
         if edge_net < self.cfg.min_edge_pct:
             return None
-        if depth_yes < self.cfg.min_book_depth_usd or depth_no < self.cfg.min_book_depth_usd:
-            return None
 
-        # Tamanho recomendado: limitado por depth de cada side (best price level)
-        # E pelo cap por op. Conservador: 50% do depth do lado mais raso.
-        weakest_depth = min(depth_yes, depth_no)
-        size_usd = min(self.cfg.max_per_op_usd, weakest_depth * 0.5)
+        # Cost real em USDC para o par YES+NO (size_pares × (vwap_y+vwap_n))
+        effective_pairs = min(fillable_yes, fillable_no)  # par = 1 YES + 1 NO
+        size_usd = effective_pairs * (vwap_yes + vwap_no)
         if size_usd < 1.0:
             return None
+        if depth_yes_usd < self.cfg.min_book_depth_usd or depth_no_usd < self.cfg.min_book_depth_usd:
+            return None
 
+        log.debug(
+            "arb_vwap_resolved",
+            cond_id=cond_id, vwap_yes=vwap_yes, vwap_no=vwap_no,
+            best_l1_yes=best_l1_yes, best_l1_no=best_l1_no,
+            levels_yes=lv_yes, levels_no=lv_no,
+            cost_yes=cost_yes_usd, cost_no=cost_no_usd,
+            target_tokens=effective_target,
+        )
+
+        # ArbOpportunity.ask_yes/ask_no agora carregam VWAP (preço efetivo
+        # de execução do tamanho recomendado) — semântica explícita pro
+        # executor que vai cotizar/postar ordens nesse preço.
         op = ArbOpportunity(
             id=str(uuid.uuid4()),
             condition_id=str(cond_id),
             yes_token_id=yes_id,
             no_token_id=no_id,
             market_title=market.get("question") or market.get("title"),
-            ask_yes=ask_yes,
-            ask_no=ask_no,
-            depth_yes_usd=depth_yes,
-            depth_no_usd=depth_no,
+            ask_yes=vwap_yes,
+            ask_no=vwap_no,
+            depth_yes_usd=depth_yes_usd,
+            depth_no_usd=depth_no_usd,
             edge_gross_pct=edge_gross,
             edge_net_pct=edge_net,
             suggested_size_usd=size_usd,
