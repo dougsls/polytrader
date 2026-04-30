@@ -26,6 +26,7 @@ from typing import Any
 import aiosqlite
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 
 from src.core.database import DEFAULT_DB_PATH
 from src.core.logger import get_logger
@@ -38,6 +39,7 @@ from src.executor.risk_manager import RiskManager
 log = get_logger(__name__)
 
 DASHBOARD_HTML_PATH = Path(__file__).parent / "templates" / "index.html"
+DASHBOARD_STATIC_DIR = Path(__file__).parent / "static"
 
 
 def aiosqlite_safe_loads(raw: str | None) -> list[str]:
@@ -154,6 +156,15 @@ def build_app(
 ) -> FastAPI:
     app = FastAPI(title="polytrader", docs_url=None, redoc_url=None)
     auth = Depends(_auth_dep(dashboard_user, secret))
+
+    # Static files (CSS/JS do dashboard premium) — sem auth (públicos por
+    # design; secret protege apenas o HTML root + APIs)
+    if DASHBOARD_STATIC_DIR.is_dir():
+        app.mount(
+            "/static",
+            StaticFiles(directory=str(DASHBOARD_STATIC_DIR)),
+            name="static",
+        )
 
     # --------- public (no auth) ---------
 
