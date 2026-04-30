@@ -31,6 +31,7 @@ from src.core.database import DEFAULT_DB_PATH
 from src.core.logger import get_logger
 from src.core.metrics import halted, render_metrics
 from src.core.state import InMemoryState
+from src.dashboard.demo_api import build_demo_router
 from src.executor.balance_cache import BalanceCache
 from src.executor.risk_manager import RiskManager
 
@@ -767,5 +768,19 @@ def build_app(
     @app.get("/positions", dependencies=[auth])
     async def positions_legacy() -> dict[str, Any]:
         return await api_positions()
+
+    # === Demo Dashboard API (24h paper realista) =====================
+    # Endpoints sob /api/demo/* — protegidos pelo mesmo Basic Auth.
+    # Banca inicial vem da config.executor.max_portfolio_usd.
+    from src.core.config import get_settings
+    starting_bank = float(get_settings().config.executor.max_portfolio_usd)
+    demo_router = build_demo_router(
+        auth_dep=auth,
+        shared_conn=shared_conn,
+        starting_bank_usd=starting_bank,
+        started_at=started_at,
+        mode=mode,
+    )
+    app.include_router(demo_router)
 
     return app
