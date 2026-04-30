@@ -66,6 +66,19 @@ class TradeSignal(_BaseModel):
     # Portfolio da whale (volume_usd do enrich). Usado por whale_proportional
     # para calcular convicção: (trade_usd / whale_portfolio) × our_portfolio.
     whale_portfolio_usd: float | None = None
+    # RISK MGMT — Win rate histórico PURO da whale (sem mistura com PnL/
+    # recency/diversidade do score composto). Usado pelo Kelly Criterion:
+    #   f* = win_rate - (1-win_rate)/odds
+    # Score composto distorce a fórmula (mistura ranks heterogêneos).
+    # None = fallback ao wallet_score com warning (compat retroativa).
+    whale_win_rate: float | None = None
+    # RISK MGMT — Inventário da whale neste token APÓS o trade (em USD).
+    # Anti-fragmentação: ordens grandes são partidas em múltiplos fills no
+    # CLOB; usar `usd_value` do fill isolado faz o bot calcular convicção
+    # baixa N vezes. Esse campo carrega `current_whale_size × price` quando
+    # o payload do RTDS emite `currentSize` — convicção real = posição
+    # final desejada / whale_bank.
+    whale_total_position_usd: float | None = None
 
 
 class CopyTrade(_BaseModel):

@@ -237,6 +237,10 @@ async def amain() -> None:
     active_wallets: set[str] = set()
     wallet_scores: dict[str, float] = {}
     wallet_portfolios: dict[str, float] = {}
+    # RISK MGMT — win_rate cru por wallet (paralelo a scores). Usado pelo
+    # Kelly Criterion no executor; mantido separado de scores para evitar
+    # que a fórmula f* = p - q/odds receba uma métrica composta por p.
+    wallet_win_rates: dict[str, float] = {}
     rtds = RTDSClient(active_wallets)
     signal_queue: asyncio.Queue[TradeSignal] = asyncio.Queue(maxsize=1000)
     monitor = TradeMonitor(
@@ -245,6 +249,7 @@ async def amain() -> None:
         wallet_scores=wallet_scores, queue=signal_queue,
         conn=shared_conn, state=state,
         wallet_portfolios=wallet_portfolios,
+        wallet_win_rates=wallet_win_rates,
     )
     scanner = Scanner(
         cfg=settings.config.scanner,
@@ -254,6 +259,7 @@ async def amain() -> None:
         wallet_scores=wallet_scores,
         state=state,
         wallet_portfolios=wallet_portfolios,
+        wallet_win_rates=wallet_win_rates,
     )
 
     # --- balance cache (Phase 3/5) --------------------------------------

@@ -2,7 +2,7 @@
 
 **Bot autônomo de copy-trading + engine de arbitragem matemática para Polymarket.** Identifica carteiras lucrativas no leaderboard, monitora suas operações em tempo real e replica posições. Em paralelo, varre todos os mercados ativos buscando ineficiências `YES + NO < $1` e captura o spread via `mergePositions` no CTF — lucro garantido sem dependência de alpha de baleias.
 
-Python 3.12+ · 100% async · **155 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
+Python 3.12+ · 100% async · **169 testes** · ruff limpo · SQLite com WAL · `AsyncWeb3` nativo · stack leve (~80 deps)
 
 **HFT Mode** (opcional via config): consumidor concorrente de signals, Optimistic Execution sem pre-flight REST, sizing proporcional ao patrimônio da baleia, rollback atômico, **DB INSERT fora do hot path**, **`post_order` 100% async via httpx + HMAC inline**, **WebSocket reconect agressivo + zombie detection**, **`GammaAPIClient` 3-tier cache (RAM 50ns → SQLite 500µs → REST 100ms)**, **`TradeEvent` dataclass com slots**, **drift correction via `currentSize` (full-exit override quando whale zera)**, **VWAP scanner (elimina falso-positivo Top of Book)**, **CTF `AsyncWeb3` nativo (zero `run_in_executor`) + EIP-1559 dinâmico via Polygon Gas Station**.
 
@@ -447,6 +447,34 @@ Refactor:
 
 Cobertura: 16 testes novos em [tests/test_arbitrage_vwap.py](tests/test_arbitrage_vwap.py) + [tests/test_gas_oracle.py](tests/test_gas_oracle.py) — VWAP math (5 cenários), false-positive elimination, scanner integration, gas oracle cascade (gas station / fee_history / hardcoded / cap / cache TTL / object-attr access).
 
+### Risk Manager — SELL bypass + Kelly puro + anti-fragmentação
+
+Três falhas perigosas no `RiskManager` corrigidas (vulnerabilidades de fundos quantitativos clássicas):
+
+**1. Circuit Breaker SELL Bypass.** O `evaluate` antigo retornava `False` para todos os signals quando `_halted=True`. Em mercado caindo, a whale dispara SELL para estancar — bot rejeitava por estar "halted" e afundava com a posição. Refactor:
+
+- Halt SELL bypass: `if self._halted and signal.side == "BUY": reject; else (SELL): pass`
+- `daily_loss` / `drawdown` triggers ainda chamam `self.halt(...)` (mantém estado halted contra próximos BUYs), mas SELL no mesmo evento prossegue para o sizing pipeline
+- `MAX_POSITIONS` e `PORTFOLIO_CAP` são BUY-only (SELL libera capital, não consome)
+- `LOW_SCORE` e `PRICE_BAND` continuam validando ambos (proteção contra venda em mercados zerados)
+- Logs `halted_buy_blocked` (bloqueado) vs `halted_sell_bypass` (executado) para auditoria
+
+**2. Kelly Criterion com `win_rate` puro.** A fórmula `f* = p − q/odds` exige que `p` seja a probabilidade real de vitória. O código antigo usava `signal.wallet_score` — uma média ponderada de PnL+recência+diversidade+win_rate — distorcendo violentamente o sizing. Cenário canônico: whale com score composto 0.95 (top performer multi-fator) mas win_rate real 0.55 → antes do fix, Kelly calculava f*=0.90 (ALL-IN capped 25%); agora calcula f*=0.10 (realista). Refactor:
+
+- `TradeSignal.whale_win_rate: float | None` adicionado, propagado paralelo a `wallet_score`
+- Novo dict `wallet_win_rates: dict[str, float]` mantido pelo Scanner (mesmo padrão arquitetural de `wallet_scores`/`wallet_portfolios`)
+- `_size_usd` Kelly: `win = signal.whale_win_rate if not None else signal.wallet_score` (fallback explícito + warning log para auditoria)
+- Clamp defensivo: `win ∈ [0.01, 0.99]` (evita divisão por zero em odds extremas)
+
+**3. Anti-fragmentação no `whale_proportional`.** CLOBs particionam ordens grandes em múltiplos fills (ordem $100k = 10× $10k). O cálculo antigo `conviction = signal.usd_value / whale_bank` calculava 10× uma convicção pequena → bot fazia 10 entries picadas. Refactor:
+
+- `TradeSignal.whale_total_position_usd` carrega o **inventário total da whale no token APÓS o fill** (em USD), não o size do fill atomic
+- `signal_detector.detect_signal` popula via `evt.current_whale_size × price` quando RTDS emite `currentSize`; fallback `None` quando ausente
+- `_size_usd` whale_proportional: `whale_position_usd = signal.whale_total_position_usd or signal.usd_value` → `conviction = whale_position_usd / whale_bank`
+- Bot agora "cresce" a posição conforme a whale completa a ordem (3º fill = 30% acumulado → 15 USD; 10º fill = posição final → 50 USD na nossa banca proporcional), em vez de 10× $5
+
+Cobertura: 14 testes novos em [tests/test_risk_refactor.py](tests/test_risk_refactor.py) — SELL bypass em daily_loss/drawdown, BUY ainda bloqueado, MAX_POSITIONS/PORTFOLIO_CAP só pra BUY, LOW_SCORE+PRICE_BAND ainda validam SELL, Kelly com win_rate puro vs fallback, distortion regression demonstrada matematicamente, total_position vs fill_size, fragmentação corrigida em 10× fills, cap de outlier 0.25.
+
 ---
 
 ## Performance
@@ -786,13 +814,14 @@ polytrader/
 ## Testes
 
 ```bash
-uv run python -m pytest -q               # 155 testes em ~12s
+uv run python -m pytest -q               # 169 testes em ~9s
 uv run python -m pytest tests/test_slippage.py -v   # prova da Regra 1
 uv run python -m pytest tests/test_arbitrage_scanner.py tests/test_depth_sizing.py -v  # Tracks A+B
 uv run python -m pytest tests/test_optimistic_execution.py tests/test_concurrent_engine.py -v  # HFT mode
 uv run python -m pytest tests/test_hft_hot_path.py -v  # Hot path: HMAC, no disk I/O, zombie WS
 uv run python -m pytest tests/test_trade_event.py tests/test_exit_sync_drift.py tests/test_gamma_ram_cache.py -v  # parsing layer
 uv run python -m pytest tests/test_arbitrage_vwap.py tests/test_gas_oracle.py -v  # VWAP edge + dynamic gas
+uv run python -m pytest tests/test_risk_refactor.py -v  # SELL bypass + Kelly + anti-fragmentação
 uv run python -m pytest tests/benchmark.py -q       # benchmarks hot path
 ```
 
@@ -817,6 +846,7 @@ Cobertura das leis:
 | HFT (Gamma 3-tier RAM cache) | `test_gamma_ram_cache.py` |
 | Quant (VWAP scanner edge math) | `test_arbitrage_vwap.py` |
 | MEV (dynamic gas oracle cascade) | `test_gas_oracle.py` |
+| Risk (SELL bypass + Kelly + fragmentation) | `test_risk_refactor.py` |
 
 ---
 

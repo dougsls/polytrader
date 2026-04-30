@@ -4,15 +4,22 @@ Checklist por trade:
     1. Score da carteira fonte ≥ min_confidence_score
     2. Preço do outcome em [min_price, max_price]
     3. Mercado não resolvido
-    4. Número de posições < max_positions
-    5. Daily loss não excedido
-    6. Drawdown < max_drawdown_pct
-    7. Portfolio + sizing proposto ≤ max_portfolio_usd
+    4. Número de posições < max_positions (BUY only)
+    5. Daily loss não excedido (BUY only — SELL é exit, sempre permitido)
+    6. Drawdown < max_drawdown_pct (BUY only — SELL é exit)
+    7. Portfolio + sizing proposto ≤ max_portfolio_usd (BUY only)
     8. Posição proposta ≤ max_position_usd
 
 Qualquer falha → `RiskDecision(allowed=False, reason=...)`.
-Quando uma condição de halt global é atingida (daily_loss, drawdown), o
-manager memoriza `is_halted=True` e rejeita todo novo trade até reset.
+
+⚠️  RISK MANAGEMENT — SELL bypass durante halt:
+    Quando uma condição de halt global é atingida (daily_loss, drawdown,
+    consecutive post fails), o manager memoriza `is_halted=True` e
+    rejeita NEW BUYs. Mas SELLs (Exit Syncing) são SEMPRE permitidos
+    mesmo em halt — caso contrário, em mercado caindo o bot ficaria
+    incapaz de liquidar inventário e afundaria com a posição.
+    Auditoria: logs `halted_buy_blocked` (rejeitado) vs
+    `halted_sell_bypass` (executado).
 """
 from __future__ import annotations
 
@@ -90,21 +97,46 @@ class RiskManager:
         if mode == "proportional":
             return portfolio * self._cfg.proportional_factor
         if mode == "kelly":
-            # f* = win_rate - (1-win_rate)/odds. Odds ≈ (1-price)/price.
+            # f* = p - q/odds. Odds ≈ (1-price)/price.
+            #
+            # RISK MGMT — usa win_rate PURO da whale (não composta).
+            # wallet_score mistura PnL+recência+diversidade+win_rate; usar
+            # como `p` na fórmula distorce o sizing em ordens de magnitude.
+            # Fallback ao score só se win_rate ausente (logado pra audit).
             price = max(min(signal.price, 0.99), 0.01)
-            win = signal.wallet_score
+            if signal.whale_win_rate is not None:
+                win = signal.whale_win_rate
+            else:
+                win = signal.wallet_score
+                log.warning(
+                    "kelly_fallback_to_wallet_score",
+                    signal_id=signal.id, wallet_score=signal.wallet_score,
+                    note="whale_win_rate ausente; resultado pode estar distorcido",
+                )
+            # Clamp `win` em [0.01, 0.99] — fora desse range Kelly diverge.
+            win = max(0.01, min(win, 0.99))
             lose = 1 - win
             odds = (1 - price) / price
             kelly = max(win - lose / odds, 0.0)
             return portfolio * min(kelly, 0.25)
         if mode == "whale_proportional":
-            # Espelha a % que a whale apostou DO PORTFOLIO DELA.
-            # size_usd = (whale_trade_usd / whale_portfolio_usd) × our_portfolio × factor
-            # Se whale_portfolio ausente/zero, fallback para proportional.
+            # RISK MGMT — Anti-fragmentação: usa o INVENTÁRIO TOTAL da
+            # whale no token (whale_total_position_usd, populado pelo
+            # signal_detector quando RTDS emite currentSize) em vez do
+            # `usd_value` do fill isolado. Sem isso, ordens fragmentadas
+            # pelo CLOB (~$100k em 10× $10k) gerariam 10 trades picados
+            # com convicção 10× pequena.
             whale_bank = (signal.whale_portfolio_usd or 0.0)
-            if whale_bank <= 0 or signal.usd_value <= 0:
+            # Anti-fragmentação: prefere a posição final desejada da whale
+            # ao tamanho do fill atomic.
+            whale_position_usd = (
+                signal.whale_total_position_usd
+                if signal.whale_total_position_usd and signal.whale_total_position_usd > 0
+                else signal.usd_value
+            )
+            if whale_bank <= 0 or whale_position_usd <= 0:
                 return portfolio * self._cfg.proportional_factor
-            conviction = signal.usd_value / whale_bank
+            conviction = whale_position_usd / whale_bank
             # cap hard em 25% do nosso portfolio pra evitar outlier (whale
             # fazendo all-in num trade de lottery)
             conviction_capped = min(conviction, 0.25)
@@ -114,28 +146,65 @@ class RiskManager:
     # -- Checklist ----------------------------------------------------------
 
     def evaluate(self, signal: TradeSignal, state: RiskState) -> RiskDecision:
-        cfg = self._cfg
-        if self._halted:
-            return RiskDecision(False, f"HALTED: {self._halt_reason}", 0.0)
+        """Risk gates com SELL bypass durante halt.
 
+        Ordem dos checks:
+            1. Score, price band — sempre aplicados (BUY+SELL).
+            2. Halt global: SELL passa (exit always allowed).
+            3. BUY-only: max_positions, daily_loss, drawdown, portfolio_cap.
+            4. SELL: pula caps de capital novo (não consome banca).
+        """
+        cfg = self._cfg
+
+        # --- 1. Checks que se aplicam a BUY e SELL ----------------------
         if signal.wallet_score < cfg.min_confidence_score:
             return RiskDecision(False, f"LOW_SCORE: {signal.wallet_score:.2f}", 0.0)
         if not (cfg.min_price <= signal.price <= cfg.max_price):
             return RiskDecision(False, f"PRICE_BAND: {signal.price}", 0.0)
+
+        # --- 2. Halt: BUY rejeitado, SELL liberado (Exit Syncing) -------
+        if self._halted:
+            if signal.side == "BUY":
+                log.warning(
+                    "halted_buy_blocked",
+                    reason=self._halt_reason, signal_id=signal.id,
+                )
+                return RiskDecision(False, f"HALTED_BUY: {self._halt_reason}", 0.0)
+            # SELL bypass — log + segue pra sizing.
+            log.warning(
+                "halted_sell_bypass",
+                reason=self._halt_reason, signal_id=signal.id,
+                wallet=signal.wallet_address[:12],
+            )
+
+        # --- 3. BUY-only: caps de capital e exposure --------------------
         if signal.side == "BUY":
             if state.open_positions >= cfg.max_positions:
                 return RiskDecision(False, "MAX_POSITIONS", 0.0)
 
-        if abs(state.daily_pnl) >= cfg.max_daily_loss_usd and state.daily_pnl < 0:
-            self.halt("daily_loss_exceeded")
-            return RiskDecision(False, "DAILY_LOSS", 0.0)
-        if state.current_drawdown >= cfg.max_drawdown_pct:
-            self.halt("drawdown_exceeded")
-            return RiskDecision(False, "DRAWDOWN", 0.0)
+            if abs(state.daily_pnl) >= cfg.max_daily_loss_usd and state.daily_pnl < 0:
+                self.halt("daily_loss_exceeded")
+                return RiskDecision(False, "DAILY_LOSS", 0.0)
+            if state.current_drawdown >= cfg.max_drawdown_pct:
+                self.halt("drawdown_exceeded")
+                return RiskDecision(False, "DRAWDOWN", 0.0)
+        else:
+            # --- SELL: triggers ainda RODAM (mantém estado halted pra
+            # próximos BUYs), mas NÃO bloqueiam o exit corrente.
+            if abs(state.daily_pnl) >= cfg.max_daily_loss_usd and state.daily_pnl < 0:
+                self.halt("daily_loss_exceeded")
+                # NÃO retorna False — SELL prossegue pra estancar.
+            elif state.current_drawdown >= cfg.max_drawdown_pct:
+                self.halt("drawdown_exceeded")
+                # idem — SELL prossegue.
 
+        # --- 4. Sizing + caps finais ------------------------------------
         sized = min(self._size_usd(signal, state), cfg.max_position_usd)
-        if state.total_invested + sized > cfg.max_portfolio_usd:
-            return RiskDecision(False, "PORTFOLIO_CAP", 0.0)
+        # PORTFOLIO_CAP só faz sentido pra BUY (consome novo capital).
+        # SELL libera capital — não há cap de saída.
+        if signal.side == "BUY":
+            if state.total_invested + sized > cfg.max_portfolio_usd:
+                return RiskDecision(False, "PORTFOLIO_CAP", 0.0)
         if sized <= 0:
             return RiskDecision(False, "ZERO_SIZE", 0.0)
 

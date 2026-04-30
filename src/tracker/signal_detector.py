@@ -95,6 +95,7 @@ async def detect_signal(
     conn: aiosqlite.Connection | None = None,
     state: InMemoryState | None = None,
     whale_portfolio_usd: float | None = None,
+    whale_win_rate: float | None = None,
     parsed: TradeEvent | None = None,
 ) -> TradeSignal | None:
     """Retorna TradeSignal qualificado ou None se o trade deve ser ignorado.
@@ -268,6 +269,19 @@ async def detect_signal(
         "",
     )
 
+    # RISK MGMT — Anti-fragmentação. Quando o RTDS emite `currentSize`,
+    # carregamos no signal o INVENTÁRIO TOTAL da whale neste token APÓS
+    # o fill (em USD). Em CLOBs, ordens grandes (~$100k) chegam como
+    # múltiplos fills (~$10k cada). Sem este campo, whale_proportional
+    # calcularia convicção 10× pequena e bot compraria picado.
+    # Para BUY: current_whale_size é o saldo que cresceu com o trade.
+    # Para SELL: representa o residual; sizing de SELL não usa este
+    # caminho (Exit Sync sobrescreve via _compute_exit_size).
+    if evt.current_whale_size is not None and evt.current_whale_size > 0 and price > 0:
+        whale_total_position_usd: float | None = evt.current_whale_size * price
+    else:
+        whale_total_position_usd = None
+
     # model_construct pula validação — dados vêm do nosso código, não de input
     # externo. Reutiliza end_dt já parseado + normalizado acima (sem 2º parse).
     market_end_date = end_dt
@@ -293,4 +307,6 @@ async def detect_signal(
         status="pending",
         skip_reason=None,
         whale_portfolio_usd=whale_portfolio_usd,
+        whale_win_rate=whale_win_rate,
+        whale_total_position_usd=whale_total_position_usd,
     )

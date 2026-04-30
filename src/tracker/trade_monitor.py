@@ -40,6 +40,7 @@ class TradeMonitor:
         conn: aiosqlite.Connection | None = None,
         state: InMemoryState | None = None,
         wallet_portfolios: dict[str, float] | None = None,
+        wallet_win_rates: dict[str, float] | None = None,
     ) -> None:
         self._cfg = cfg
         self._data = data_client
@@ -47,6 +48,8 @@ class TradeMonitor:
         self._ws = ws_client
         self._scores = wallet_scores
         self._portfolios = wallet_portfolios or {}
+        # RISK MGMT — win_rate cru por wallet (paralelo a _scores).
+        self._win_rates = wallet_win_rates or {}
         self._queue = queue
         self._db_path = db_path
         self._conn = conn
@@ -118,6 +121,7 @@ class TradeMonitor:
             trade=trade,
             wallet_score=self._scores.get(wallet_lower, 0.0),
             whale_portfolio_usd=self._portfolios.get(wallet_lower),
+            whale_win_rate=self._win_rates.get(wallet_lower),
             cfg=self._cfg, gamma=self._gamma, data_client=self._data,
             db_path=self._db_path, conn=self._conn, state=self._state,
         )
