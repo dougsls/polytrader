@@ -381,12 +381,23 @@ async def amain() -> None:
             except asyncio.TimeoutError:
                 pass
 
+    # Holder mutável pra wirar callback de auto-subscribe (UserWSClient
+    # ainda não existe nesse ponto). Engine recebe wrapper que delega
+    # ao user_ws quando ele virar disponível abaixo.
+    user_ws_holder: dict[str, Any] = {"client": None}
+
+    async def _on_order_submitted(condition_id: str) -> None:
+        client = user_ws_holder.get("client")
+        if client is not None:
+            await client.add_market(condition_id)
+
     engine = CopyEngine(
         cfg=settings.config.executor, clob=clob, gamma=gamma, risk=risk,
         queue=signal_queue, state=state,
         risk_state_provider=lambda: live_state["rs"],
         on_event=on_event, conn=shared_conn,
         depth_cfg=settings.config.depth_sizing,
+        on_order_submitted=_on_order_submitted,
     )
 
     # --- CTF client compartilhado — usado por:
@@ -544,10 +555,14 @@ async def amain() -> None:
             user_ws = UserWSClient(
                 credentials=clob._creds,
                 on_fill=_on_user_fill,
-                condition_ids=set(),  # subscribe vazio inicial; cresce via reconcile
+                # Set vazio inicial; cresce auto-subscribe via
+                # _on_order_submitted callback do CopyEngine quando ordem
+                # GTC live é submetida em condition_id novo.
+                condition_ids=set(),
             )
+            user_ws_holder["client"] = user_ws  # ativa o callback
             tasks.append(asyncio.create_task(user_ws.run(), name="user-ws"))
-            log.info("user_ws_wired_for_fill_confirmation")
+            log.info("user_ws_wired_for_fill_confirmation_with_auto_subscribe")
     else:
         log.warning("executor_disabled_via_config")
         notifier.notify("⚠️ Executor desabilitado por config — sinais não serão executados")

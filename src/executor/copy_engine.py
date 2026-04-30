@@ -58,13 +58,14 @@ class CopyEngine:
         clob: CLOBClient,
         gamma: GammaAPIClient,
         risk: RiskManager,
-        queue: asyncio.Queue,
+        queue: asyncio.Queue[Any],
         state: InMemoryState,
         risk_state_provider: Callable[[], RiskState],
         on_event: NotifyCallback = None,
         db_path: Path = DEFAULT_DB_PATH,
         conn: aiosqlite.Connection | None = None,
         depth_cfg: Any | None = None,
+        on_order_submitted: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         self._cfg = cfg
         self._clob = clob
@@ -83,6 +84,10 @@ class CopyEngine:
         # Trades aguardando confirmação de fill via user_ws (live + GTC).
         # Map order_id → CopyTrade. handle_fill_event consome esta map.
         self._pending_fills: dict[str, tuple[TradeSignal, CopyTrade]] = {}
+        # Callback para auto-subscribe ao UserWSClient quando ordem GTC
+        # é submetida em condition_id novo. Sem isso, fills nesse mercado
+        # não chegam até o próximo restart com reconcile.
+        self._on_order_submitted = on_order_submitted
         # HFT — Semaphore limita ordens em flight ao CLOB. NY→London 100ms
         # × 4 concurrent = ~40 ord/s, longe do rate limit Polymarket.
         max_conc = int(getattr(cfg, "max_concurrent_signals", 1) or 1)
@@ -266,9 +271,9 @@ class CopyEngine:
                 allowed = True
                 reason = "OK"
                 sized_usd = sized
-            decision = _D()
+            decision_pm: Any = _D()
             ref_price = signal.price  # bypass slippage anchor — usa preço whale
-            return decision, ref_price
+            return decision_pm, ref_price
 
         # === Non-perfect-mirror branch: risk gates + slippage anchoring ====
         # ⚠️ avoid_resolved_markets / enforce_market_duration — defesa em
@@ -297,7 +302,9 @@ class CopyEngine:
                     return None
 
         # 1. Risk gates
-        decision = self._risk.evaluate(signal, self._risk_state())
+        # `decision` é union: _D inline (perfect_mirror) ou RiskDecision.
+        # Anotação Any pra evitar mypy assignment-mismatch entre os branches.
+        decision: Any = self._risk.evaluate(signal, self._risk_state())
         if not decision.allowed:
             await self._mark_skipped(signal, f"RISK: {decision.reason}")
             return None
@@ -550,21 +557,92 @@ class CopyEngine:
             )
             return
 
-        # GTC — não aplicar fill ainda. Marca submitted + watchdog timeout.
+        # GTC — não aplicar fill ainda. Marca submitted + auto-subscribe
+        # UserWS no condition_id (sem isso, fill events não chegam).
         await update_trade_status(
             trade.id, status="submitted", order_id=order_id,
             conn=self._conn, db_path=self._db_path,
         )
         if order_id:
             self._pending_fills[order_id] = (signal, trade)
+            # Auto-subscribe UserWS (defesa contra condition_ids=set() inicial).
+            if self._on_order_submitted is not None:
+                try:
+                    await self._on_order_submitted(signal.condition_id)
+                except Exception as exc:  # noqa: BLE001 — não bloqueia ordem
+                    log.warning(
+                        "on_order_submitted_callback_failed",
+                        condition_id=signal.condition_id[:12], err=repr(exc)[:80],
+                    )
+            # Watchdog FOK fallback: se timeout sem fill, watchdog
+            # cancela e reposta como FOK. ⚠️ Capturamos o retorno: se
+            # o fallback FOK retorna match (success=True), aplicamos
+            # fill local. Antes, o retorno era ignorado e fills do
+            # fallback ficavam sem registro local.
             if self._cfg.fok_fallback:
-                asyncio.create_task(watchdog_order(
-                    clob=self._clob, order_id=order_id, draft=draft,
-                    timeout_s=self._cfg.fok_fallback_timeout_seconds,
-                ), name=f"watchdog-{order_id[:8]}")
+                asyncio.create_task(
+                    self._run_watchdog_and_handle_fill(
+                        signal=signal, trade=trade, draft=draft,
+                        order_id=order_id,
+                    ),
+                    name=f"watchdog-{order_id[:8]}",
+                )
         log.info(
             "order_submitted_awaiting_fill",
             trade_id=trade.id, order_id=order_id, side=signal.side,
+        )
+
+    async def _run_watchdog_and_handle_fill(
+        self, *,
+        signal: TradeSignal, trade: CopyTrade, draft: Any, order_id: str,
+    ) -> None:
+        """⚠️ Watchdog wrapper que captura o retorno do FOK fallback.
+
+        watchdog_order retorna:
+          - None se a ordem original GTC preencheu dentro do timeout
+            (fill aplicado via UserWS); ou se o fallback FOK também falhou.
+          - dict com `success=True` se o FOK fallback preencheu agora.
+
+        Caso 2 NÃO chega no UserWS porque a ordem fallback é nova (outro
+        order_id). Sem este handler, o fill seria perdido — bot ficaria
+        com state local desatualizado vs CLOB.
+        """
+        try:
+            fok_resp = await watchdog_order(
+                clob=self._clob, order_id=order_id, draft=draft,
+                timeout_s=self._cfg.fok_fallback_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("watchdog_crashed", order_id=order_id[:8], err=repr(exc))
+            return
+        if fok_resp is None:
+            # GTC original encheu sozinha (UserWS aplica fill) OU
+            # fallback FOK também falhou. Nada a fazer aqui.
+            return
+        # FOK fallback preencheu — aplica fill localmente. Como a ordem
+        # FOK é nova, o `_pending_fills` ainda tem o trade original
+        # esperando fill. Removemos o entry e aplicamos.
+        if not (fok_resp.get("success") and not fok_resp.get("errorMsg")):
+            log.warning(
+                "fok_fallback_returned_unsuccessful",
+                order_id=order_id[:8], resp=str(fok_resp)[:120],
+            )
+            return
+        # Remove a entry do pending — fill já foi consumido aqui.
+        self._pending_fills.pop(order_id, None)
+        new_order_id = fok_resp.get("orderID") or fok_resp.get("orderId") or ""
+        await update_trade_status(
+            trade.id, status="submitted", order_id=new_order_id,
+            conn=self._conn, db_path=self._db_path,
+        )
+        await self._apply_fill_local(
+            signal=signal, trade=trade,
+            executed_size=float(draft.size), executed_price=float(draft.price),
+            start_perf=0.0,
+        )
+        log.info(
+            "fok_fallback_filled_locally_applied",
+            original_order=order_id[:8], new_order=new_order_id[:8],
         )
 
     async def _apply_fill_local(

@@ -22,7 +22,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import orjson
-import websockets
+import websockets  # noqa: F401  # WebSocketException é usado no except block abaixo
 
 from src.api.auth import L2Credentials
 from src.core.logger import get_logger
@@ -54,7 +54,9 @@ class UserWSClient:
         self._on_fill = on_fill
         self._condition_ids = condition_ids
         self._stop = asyncio.Event()
-        self._ws: websockets.WebSocketClientProtocol | None = None
+        # `Any` por compat com versões variantes do websockets onde
+        # WebSocketClientProtocol foi reorganizado/deprecated em 14+.
+        self._ws: Any = None
 
     async def _send_subscription(self) -> None:
         if self._ws is None:
@@ -69,6 +71,36 @@ class UserWSClient:
             "markets": list(self._condition_ids),
         }
         await self._ws.send(orjson.dumps(msg).decode())
+
+    async def add_market(self, condition_id: str) -> bool:
+        """⚠️ Auto-subscribe: chamado pelo CopyEngine quando uma ordem
+        live é submetida em mercado novo (que ainda não estava no set
+        inicial). Adiciona ao set vivo e re-envia subscription se o WS
+        está conectado. Retorna True se a chamada efetivamente adicionou
+        o market (False se já estava presente).
+
+        Sem isso, fills GTC em mercados novos nunca chegariam até o
+        próximo restart com reconcile.
+        """
+        cid = condition_id.lower() if condition_id else ""
+        if not cid:
+            return False
+        if cid in self._condition_ids:
+            return False
+        self._condition_ids.add(cid)
+        # Re-envia subscription apenas se WS conectado. Se WS está
+        # reconectando, o set vivo é lido pelo `_send_subscription`
+        # automaticamente ao reconectar.
+        if self._ws is not None:
+            try:
+                await self._send_subscription()
+                log.info("user_ws_market_added", condition_id=cid[:12])
+            except Exception as exc:  # noqa: BLE001 — re-subscribe falha não bloqueia
+                log.warning(
+                    "user_ws_resubscribe_failed",
+                    condition_id=cid[:12], err=repr(exc)[:80],
+                )
+        return True
 
     async def run(self) -> None:
         backoff = 1.0

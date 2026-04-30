@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -181,11 +180,7 @@ def test_kelly_distortion_when_using_composite_score_demonstrated():
     # Antes (incorreto): p=0.95 → f* = 0.95 - 0.05/1 = 0.90 → all-in capped 25%
     # Depois (correto): p=0.55 → f* = 0.10
     sig = _signal(wallet_score=0.95, whale_win_rate=0.55, price=0.50)
-    d_correct = rm.evaluate(sig, _state())
-
-    # Para comparação: simulação do bug antigo via fallback
     sig_buggy = _signal(wallet_score=0.95, whale_win_rate=None, price=0.50, id="s2")
-    d_buggy = rm.evaluate(sig_buggy, _state())
 
     # Em config real ambos ficam capped pelo max_position_usd=10, mas
     # podemos verificar que a fórmula interna difere via portfolio raw.

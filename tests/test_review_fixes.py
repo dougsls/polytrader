@@ -250,14 +250,21 @@ async def test_executor_disabled_blocks_all_signals():
 
 @pytest.mark.asyncio
 async def test_avoid_resolved_markets_skips_closed():
+    """Mercado closed/resolved → skip MARKET_RESOLVED."""
     cfg = _make_engine_cfg(avoid_resolved_markets=True)
     eng = _build_engine(cfg)
     eng._gamma.get_market = AsyncMock(  # type: ignore[method-assign]
         return_value={"closed": True}
     )
+    # Mock _mark_skipped pra evitar UPDATE real em trade_signals (sem
+    # tabela em DB de teste isolado). Verificamos que foi chamado com
+    # MARKET_RESOLVED.
+    eng._mark_skipped = AsyncMock()  # type: ignore[method-assign]
     sig = _make_signal(side="BUY")
     result = await eng._make_decision(sig, perfect_mirror=False)
     assert result is None  # rejected
+    eng._mark_skipped.assert_awaited_once()
+    assert eng._mark_skipped.call_args.args[1] == "MARKET_RESOLVED"
 
 
 # ============ Item 3 — INSERT OR IGNORE preserva status ============
