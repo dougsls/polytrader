@@ -23,6 +23,7 @@ from src.api.data_client import DataAPIClient
 from src.api.gamma_client import GammaAPIClient
 from src.api.http import close_http_client, prewarm_connections
 from src.api.startup_checks import check_geoblock, latency_baseline
+from src.api.user_ws_client import UserWSClient
 from src.api.websocket_client import RTDSClient
 from src.arbitrage.ctf_client import CTFClient
 from src.arbitrage.executor import ArbExecutor
@@ -385,6 +386,7 @@ async def amain() -> None:
         queue=signal_queue, state=state,
         risk_state_provider=lambda: live_state["rs"],
         on_event=on_event, conn=shared_conn,
+        depth_cfg=settings.config.depth_sizing,
     )
 
     # --- CTF client compartilhado — usado por:
@@ -499,7 +501,57 @@ async def amain() -> None:
         asyncio.create_task(scanner.run_loop(), name="scanner"),
         asyncio.create_task(monitor.run_websocket(), name="tracker-ws"),
         asyncio.create_task(monitor.run_polling(active_wallets), name="tracker-polling"),
-        asyncio.create_task(engine.run_loop(), name="copy-engine"),
+    ]
+    # ⚠️ Config flag — executor.enabled=False não inicia o consumidor.
+    # Sinais ficam na queue enfileirados; engine pode ser religado em
+    # runtime via settings reload (futuro). Defesa em profundidade:
+    # mesmo se task rodar, handle_signal skip com EXECUTOR_DISABLED.
+    if settings.config.executor.enabled:
+        tasks.append(asyncio.create_task(engine.run_loop(), name="copy-engine"))
+        # ⚠️ Item 2 — UserWSClient para confirmar fills GTC live.
+        # Em paper/dry-run NÃO subscribe (sem ordens reais pra preencher).
+        # Em live: subscribe + callback que chama engine.handle_fill_event.
+        if (
+            settings.config.executor.mode == "live"
+            and settings.env.private_key
+            and clob._creds is not None
+        ):
+            async def _on_user_fill(msg: dict[str, Any]) -> None:
+                """Callback do UserWSClient — extrai order_id/size/price e
+                aplica fill no engine. Schema: msg has order_id, size_matched,
+                price (campos podem vir como str)."""
+                order_id = (
+                    msg.get("order_id")
+                    or msg.get("orderID")
+                    or msg.get("orderId")
+                    or ""
+                )
+                if not order_id:
+                    return
+                try:
+                    size = float(msg.get("size_matched") or msg.get("size") or 0)
+                    price = float(msg.get("price") or 0)
+                except (TypeError, ValueError):
+                    return
+                if size <= 0 or price <= 0:
+                    return
+                await engine.handle_fill_event(
+                    order_id=order_id,
+                    executed_size=size,
+                    executed_price=price,
+                )
+
+            user_ws = UserWSClient(
+                credentials=clob._creds,
+                on_fill=_on_user_fill,
+                condition_ids=set(),  # subscribe vazio inicial; cresce via reconcile
+            )
+            tasks.append(asyncio.create_task(user_ws.run(), name="user-ws"))
+            log.info("user_ws_wired_for_fill_confirmation")
+    else:
+        log.warning("executor_disabled_via_config")
+        notifier.notify("⚠️ Executor desabilitado por config — sinais não serão executados")
+    tasks.extend([
         asyncio.create_task(balance_cache.run_loop(), name="balance-cache"),
         asyncio.create_task(refresh_risk_state(), name="risk-state-refresh"),
         asyncio.create_task(reconcile_loop(), name="reconcile-loop"),
@@ -541,7 +593,7 @@ async def amain() -> None:
             ),
             name="daily-summary",
         ),
-    ]
+    ])
 
     # Track A — arb tasks (apenas se cfg.arbitrage.enabled).
     if arb_scanner is not None and arb_executor is not None:

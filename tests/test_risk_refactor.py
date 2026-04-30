@@ -99,9 +99,8 @@ def test_sell_doesnt_check_max_positions():
     assert d_sell.allowed
 
 
-def test_sell_still_validates_low_score_and_price_band():
-    """Bypass NÃO desativa LOW_SCORE / PRICE_BAND — protegem contra
-    venda em mercados zerados/lottery."""
+def test_sell_still_validates_low_score():
+    """LOW_SCORE protege SELL contra sinais externos não-confiáveis."""
     rm = RiskManager(load_yaml_config().executor)
     rm.halt("manual")
     d_low = rm.evaluate(
@@ -109,10 +108,16 @@ def test_sell_still_validates_low_score_and_price_band():
     )
     assert not d_low.allowed and "LOW_SCORE" in d_low.reason
 
-    d_price = rm.evaluate(
+
+def test_sell_bypasses_price_band():
+    """⚠️ Item 4 fix — PRICE_BAND é BUY-only. Token despencado a 0.02
+    deve poder ser vendido pra liberar capital. Antes, este teste
+    afirmava o oposto (bug conhecido)."""
+    rm = RiskManager(load_yaml_config().executor)
+    d_sell = rm.evaluate(
         _signal(side="SELL", price=0.02, id="s5"), _state(),
     )
-    assert not d_price.allowed
+    assert d_sell.allowed, "SELL outside band deve passar pra exit"
 
 
 # ============ Item 2 — Kelly com whale_win_rate puro ============

@@ -131,9 +131,14 @@ async def test_copy_engine_skips_slippage_check_when_bypass_true():
     from unittest.mock import patch
 
     cfg = MagicMock()
+    cfg.enabled = True
     cfg.mode = "paper"
     cfg.paper_perfect_mirror = False
     cfg.optimistic_execution = False
+    cfg.copy_buys = True
+    cfg.copy_sells = True
+    cfg.avoid_resolved_markets = False
+    cfg.enforce_market_duration = False
     cfg.min_confidence_score = 0.6
     cfg.min_price = 0.05
     cfg.max_price = 0.95
@@ -200,9 +205,14 @@ async def test_copy_engine_normal_signal_still_validates_slippage():
     from unittest.mock import patch
 
     cfg = MagicMock()
+    cfg.enabled = True
     cfg.mode = "paper"
     cfg.paper_perfect_mirror = False
     cfg.optimistic_execution = False
+    cfg.copy_buys = True
+    cfg.copy_sells = True
+    cfg.avoid_resolved_markets = False
+    cfg.enforce_market_duration = False
     cfg.min_confidence_score = 0.6
     cfg.min_price = 0.05
     cfg.max_price = 0.95
@@ -239,7 +249,7 @@ async def test_copy_engine_normal_signal_still_validates_slippage():
         wallet_score=0.8, condition_id="0xC", token_id="tok",
         side="BUY", size=100.0, price=0.50, usd_value=50.0,
         market_title="X", outcome="Yes",
-        market_end_date=None, hours_to_resolution=None,
+        market_end_date=None, hours_to_resolution=24.0,
         detected_at=datetime.now(timezone.utc),
         source="websocket", status="pending", skip_reason=None,
         # bypass_slippage_check default False

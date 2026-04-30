@@ -73,11 +73,18 @@ async def build_draft(
     gamma: GammaAPIClient,
     cfg: ExecutorConfig,
     db_path: Path = DEFAULT_DB_PATH,
+    sell_size_cap_tokens: float | None = None,
 ) -> tuple[OrderDraft, CopyTrade, MarketSpec]:
     """Constrói OrderDraft + CopyTrade em RAM. ZERO disk I/O.
 
-    O INSERT em copy_trades é responsabilidade do caller, via
-    `asyncio.create_task(persist_trade_async(trade))` DEPOIS do post_order.
+    Sizing por side (P0 fix):
+        BUY  → `raw_size = sized_usd / price` (RiskManager dimensiona em USD).
+        SELL → `raw_size = signal.size` (Exit Sync já calculou em tokens
+               proporcionais ao % vendido pela whale × bot_size). Usar
+               `sized_usd / price` aqui inverteria o sizing inteiro.
+        SELL é adicionalmente limitado por `sell_size_cap_tokens` quando
+        fornecido — defesa contra vender mais tokens do que o bot detém
+        (drift de RAM state vs DB).
 
     `db_path` permanece na assinatura por compatibilidade — não é usado.
     """
@@ -95,7 +102,12 @@ async def build_draft(
         if extra > 0:
             offset += extra
     raw_price = _limit_price(ref_price, signal.side, offset)
-    raw_size = sized_usd / max(raw_price, 0.01)
+    if signal.side == "SELL":
+        raw_size = signal.size
+        if sell_size_cap_tokens is not None and sell_size_cap_tokens >= 0:
+            raw_size = min(raw_size, sell_size_cap_tokens)
+    else:
+        raw_size = sized_usd / max(raw_price, 0.01)
     draft = build_order(spec, signal.side, raw_price, raw_size)  # type: ignore[arg-type]
 
     now = datetime.now(timezone.utc)
@@ -118,43 +130,82 @@ async def build_draft(
     return draft, trade, spec
 
 
-async def persist_trade_async(
+async def persist_trade(
     trade: CopyTrade,
     *,
     conn: aiosqlite.Connection | None = None,
     db_path: Path = DEFAULT_DB_PATH,
 ) -> None:
-    """Fire-and-forget INSERT em copy_trades. Roda em task paralela à post_order.
+    """INSERT inicial em copy_trades — chamado SINCRONAMENTE pelo caller
+    ANTES do `clob.post_order`. Fix do race INSERT/UPDATE:
 
-    Erros aqui NÃO impactam a ordem (que já foi pro CLOB). São
-    logados e tracked via metrics; ops podem reconciliar a partir do
-    histórico do CLOB se necessário.
+    Antes: este INSERT corria em fire-and-forget paralelo a `apply_fill`
+    (UPDATE). UPDATE chegava primeiro → 0 rows updated (silently).
+    Pior: `INSERT OR REPLACE` sobrescrevia o UPDATE bem-sucedido com
+    status='pending', destruindo o audit trail.
 
-    Idempotência: usa INSERT OR REPLACE pra cobrir o caso de duas
-    tasks com mesmo trade.id (não acontece hoje, mas defensivo).
+    Agora:
+      1. `await persist_trade(...)` — garante INSERT antes de qualquer UPDATE.
+      2. `INSERT OR IGNORE` — idempotência sem destruir status posterior.
+      3. UPDATEs subsequentes (status='submitted'/'filled'/'failed') sempre
+         encontram a linha existente.
+
+    Custo: ~1-3ms WAL antes do post_order. Aceitável vs corrupção do trail.
     """
-    try:
-        sql = (
-            "INSERT OR REPLACE INTO copy_trades"
-            " (id, signal_id, condition_id, token_id, side,"
-            "  intended_size, intended_price, executed_size, executed_price,"
-            "  slippage, status, created_at, filled_at, error)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        params = (
-            trade.id, trade.signal_id, trade.condition_id, trade.token_id,
-            trade.side, trade.intended_size, trade.intended_price,
-            trade.executed_size, trade.executed_price, trade.slippage,
-            trade.status, trade.created_at.isoformat(),
-            trade.filled_at.isoformat() if trade.filled_at else None,
-            trade.error,
-        )
-        if conn is not None:
-            await conn.execute(sql, params)
-            await conn.commit()
-        else:
-            async with get_connection(db_path) as db:
-                await db.execute(sql, params)
-                await db.commit()
-    except Exception as exc:  # noqa: BLE001 — fire-and-forget loga e segue
-        log.error("persist_trade_failed", trade_id=trade.id, err=repr(exc))
+    sql = (
+        "INSERT OR IGNORE INTO copy_trades"
+        " (id, signal_id, condition_id, token_id, side,"
+        "  intended_size, intended_price, executed_size, executed_price,"
+        "  slippage, status, created_at, filled_at, error)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    params = (
+        trade.id, trade.signal_id, trade.condition_id, trade.token_id,
+        trade.side, trade.intended_size, trade.intended_price,
+        trade.executed_size, trade.executed_price, trade.slippage,
+        trade.status, trade.created_at.isoformat(),
+        trade.filled_at.isoformat() if trade.filled_at else None,
+        trade.error,
+    )
+    if conn is not None:
+        await conn.execute(sql, params)
+        await conn.commit()
+    else:
+        async with get_connection(db_path) as db:
+            await db.execute(sql, params)
+            await db.commit()
+
+
+# Backwards-compat alias — testes/callers antigos importam persist_trade_async.
+persist_trade_async = persist_trade
+
+
+async def update_trade_status(
+    trade_id: str,
+    *,
+    status: str,
+    order_id: str | None = None,
+    error: str | None = None,
+    conn: aiosqlite.Connection | None = None,
+    db_path: Path = DEFAULT_DB_PATH,
+) -> None:
+    """UPDATE atomic do status do trade (submitted/failed/...) sem
+    sobrescrever campos de fill. Usado entre o post_order e o
+    apply_fill quando o fill é confirmado por user_ws ou matching."""
+    fields = ["status=?"]
+    values: list[object] = [status]
+    if order_id is not None:
+        fields.append("order_id=?")
+        values.append(order_id)
+    if error is not None:
+        fields.append("error=?")
+        values.append(error[:500])
+    values.append(trade_id)
+    sql = f"UPDATE copy_trades SET {', '.join(fields)} WHERE id=?"
+    if conn is not None:
+        await conn.execute(sql, tuple(values))
+        await conn.commit()
+    else:
+        async with get_connection(db_path) as db:
+            await db.execute(sql, tuple(values))
+            await db.commit()

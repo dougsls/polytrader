@@ -177,8 +177,6 @@ class RiskManager:
         # --- 1. Checks que se aplicam a BUY e SELL ----------------------
         if signal.wallet_score < cfg.min_confidence_score:
             return RiskDecision(False, f"LOW_SCORE: {signal.wallet_score:.2f}", 0.0)
-        if not (cfg.min_price <= signal.price <= cfg.max_price):
-            return RiskDecision(False, f"PRICE_BAND: {signal.price}", 0.0)
 
         # --- 2. Halt: BUY rejeitado, SELL liberado (Exit Syncing) -------
         if self._halted:
@@ -195,8 +193,13 @@ class RiskManager:
                 wallet=signal.wallet_address[:12],
             )
 
-        # --- 3. BUY-only: caps de capital e exposure --------------------
+        # --- 3. BUY-only: price band, caps de capital e exposure --------
+        # ⚠️ PRICE_BAND aplicado APENAS em BUY. SELL é exit-driven; se o
+        # token caiu fora da banda (ex: 0.02 < min_price=0.05), bloquear
+        # SELL prenderia capital. min_price/max_price protegem ENTRADAS.
         if signal.side == "BUY":
+            if not (cfg.min_price <= signal.price <= cfg.max_price):
+                return RiskDecision(False, f"PRICE_BAND: {signal.price}", 0.0)
             if state.open_positions >= cfg.max_positions:
                 return RiskDecision(False, "MAX_POSITIONS", 0.0)
 

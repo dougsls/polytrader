@@ -31,8 +31,13 @@ from src.core.logger import get_logger
 from src.core import metrics
 from src.core.models import CopyTrade, RiskState, TradeSignal
 from src.core.state import InMemoryState
+from src.executor.depth_sizing import quote_buy_depth, quote_sell_depth
 from src.executor.exposure import would_breach_tag_cap
-from src.executor.order_manager import build_draft, persist_trade_async
+from src.executor.order_manager import (
+    build_draft,
+    persist_trade,
+    update_trade_status,
+)
 from src.executor.order_watchdog import watchdog_order
 from src.executor.position_manager import apply_fill
 from src.executor.risk_manager import RiskManager
@@ -59,6 +64,7 @@ class CopyEngine:
         on_event: NotifyCallback = None,
         db_path: Path = DEFAULT_DB_PATH,
         conn: aiosqlite.Connection | None = None,
+        depth_cfg: Any | None = None,
     ) -> None:
         self._cfg = cfg
         self._clob = clob
@@ -70,6 +76,13 @@ class CopyEngine:
         self._on_event = on_event
         self._db_path = db_path
         self._conn = conn
+        # Depth sizing config (DepthSizingConfig | None) — quando enabled,
+        # antes de cada ordem live consulta book e ajusta size pra caber
+        # em max_impact_pct. Inativo em paper.
+        self._depth_cfg = depth_cfg
+        # Trades aguardando confirmação de fill via user_ws (live + GTC).
+        # Map order_id → CopyTrade. handle_fill_event consome esta map.
+        self._pending_fills: dict[str, tuple[TradeSignal, CopyTrade]] = {}
         # HFT — Semaphore limita ordens em flight ao CLOB. NY→London 100ms
         # × 4 concurrent = ~40 ord/s, longe do rate limit Polymarket.
         max_conc = int(getattr(cfg, "max_concurrent_signals", 1) or 1)
@@ -106,6 +119,22 @@ class CopyEngine:
     async def handle_signal(self, signal: TradeSignal) -> None:
         import time as _t
         _start = _t.perf_counter()
+
+        # === Config flag gates (defesa em profundidade) ====================
+        # Mesmo que main.py não inicie a task quando enabled=False, este
+        # check protege se o engine for instanciado/chamado por outro caminho.
+        if not self._cfg.enabled:
+            await self._mark_skipped(signal, "EXECUTOR_DISABLED")
+            return
+        # `bypass_slippage_check=True` indica stale_cleanup/emergency exit —
+        # capital travado é pior que dump em loss conhecida. Ignora copy_sells.
+        emergency_exit = signal.side == "SELL" and signal.bypass_slippage_check
+        if signal.side == "BUY" and not self._cfg.copy_buys:
+            await self._mark_skipped(signal, "COPY_BUYS_DISABLED")
+            return
+        if signal.side == "SELL" and not self._cfg.copy_sells and not emergency_exit:
+            await self._mark_skipped(signal, "COPY_SELLS_DISABLED")
+            return
 
         # PAPER PERFECT MIRROR — bypass total dos filtros (paper observation only)
         perfect_mirror = (
@@ -242,6 +271,31 @@ class CopyEngine:
             return decision, ref_price
 
         # === Non-perfect-mirror branch: risk gates + slippage anchoring ====
+        # ⚠️ avoid_resolved_markets / enforce_market_duration — defesa em
+        # profundidade contra sinais que escaparam do tracker filter
+        # (mudanças de status entre tracker.detect_signal e executor).
+        if (
+            self._cfg.avoid_resolved_markets
+            or self._cfg.enforce_market_duration
+        ):
+            try:
+                market = await self._gamma.get_market(signal.condition_id)
+            except Exception as exc:  # noqa: BLE001 — gamma falha não barra trade
+                log.debug("gamma_secondary_check_failed", err=repr(exc)[:80])
+                market = None
+            if market is not None and self._cfg.avoid_resolved_markets:
+                if market.get("closed") or market.get("resolved"):
+                    await self._mark_skipped(signal, "MARKET_RESOLVED")
+                    return None
+            if self._cfg.enforce_market_duration:
+                # Defesa secundária: rejeita mercados sem hours_to_resolution
+                # OU fora da janela permitida. tracker já filtra mas o sinal
+                # pode ter chegado por polling de fallback.
+                hrs = signal.hours_to_resolution
+                if hrs is None and not signal.bypass_slippage_check:
+                    await self._mark_skipped(signal, "MARKET_DURATION_UNKNOWN")
+                    return None
+
         # 1. Risk gates
         decision = self._risk.evaluate(signal, self._risk_state())
         if not decision.allowed:
@@ -313,88 +367,218 @@ class CopyEngine:
 
         return decision, ref_price
 
+    async def _apply_depth_sizing(
+        self, signal: TradeSignal, decision: Any,
+    ) -> tuple[bool, str | None]:
+        """Item 6 — depth sizing live. Ajusta `decision.sized_usd` baseado
+        em book real. Retorna (ok, skip_reason).
+
+        BUY: corta `decision.sized_usd` por `quote_buy_depth.fillable_size_usd`
+             considerando max_impact_pct.
+        SELL: valida que `signal.size × price` cabe no impact cap (não
+              ajusta o `signal.size` aqui — Exit Sync já calculou em tokens;
+              mas se book está vazio, skip).
+        Stale cleanup (`bypass_slippage_check=True`): pula depth gate
+        (emergency exit aceita impact maior — capital travado é pior).
+        """
+        if self._depth_cfg is None or not self._depth_cfg.enabled:
+            return True, None
+        if signal.bypass_slippage_check:
+            return True, None
+        try:
+            book = await self._clob.book(signal.token_id)
+        except Exception as exc:  # noqa: BLE001 — book lookup falha; não barra trade
+            log.warning("depth_book_fetch_failed", err=repr(exc)[:80])
+            return True, None
+        if signal.side == "BUY":
+            q = quote_buy_depth(
+                book,
+                max_size_usd=decision.sized_usd,
+                max_impact_pct=self._depth_cfg.max_impact_pct,
+                max_levels=self._depth_cfg.max_levels,
+            )
+            log.info(
+                "depth_quote",
+                side="BUY", signal_id=signal.id,
+                vwap=q.vwap_price, levels=q.levels_consumed,
+                impact_pct=q.impact_pct, book_thin=q.book_thin,
+                fillable_usd=q.fillable_size_usd,
+            )
+            if q.fillable_size_usd < 1.0:
+                return False, "DEPTH_TOO_THIN"
+            # Corta sized se depth restringe.
+            if q.fillable_size_usd < decision.sized_usd:
+                decision.sized_usd = q.fillable_size_usd
+            return True, None
+        # SELL: valida usd_value (= signal.size × signal.price) contra book de bids
+        sell_usd_target = signal.size * signal.price if signal.price > 0 else 0.0
+        if sell_usd_target <= 0:
+            return True, None  # nada que validar
+        q = quote_sell_depth(
+            book,
+            max_size_usd=sell_usd_target,
+            max_impact_pct=self._depth_cfg.max_impact_pct,
+            max_levels=self._depth_cfg.max_levels,
+        )
+        log.info(
+            "depth_quote",
+            side="SELL", signal_id=signal.id,
+            vwap=q.vwap_price, levels=q.levels_consumed,
+            impact_pct=q.impact_pct, book_thin=q.book_thin,
+            fillable_usd=q.fillable_size_usd,
+        )
+        if q.fillable_size_usd < 1.0:
+            return False, "DEPTH_TOO_THIN"
+        return True, None
+
     async def _submit_and_apply(
         self, *,
         signal: TradeSignal, decision: Any, ref_price: float,
         perfect_mirror: bool, start_perf: float,
     ) -> None:
-        """Pós-decisão: build_draft (RAM) → post_order → persist DB async → apply_fill.
+        """Pós-decisão: depth sizing → build_draft → INSERT trade → post_order
+        → submit/fill state machine.
 
-        HFT — Hot-Path:
-            Sequência crítica: o INSERT em copy_trades NÃO bloqueia o
-            envio da ordem. build_draft é puro RAM, post_order vai PRIMEIRO,
-            depois `asyncio.create_task(persist_trade_async)` corre em
-            paralelo com apply_fill. Disco SQLite (~1-3ms WAL) sai do
-            caminho crítico. Em rajadas de 10 signals, isso poupa 10-30ms
-            cumulativos do signal-to-fill.
+        ⚠️ FIXES APLICADOS:
+            - Item 1: SELL usa signal.size em tokens (com cap por bot_size)
+            - Item 3: persist_trade SINCRONO antes do post_order (race fix)
+            - Item 6: depth sizing ajusta sized_usd antes do build
+            - Item 2: live + GTC marca submitted, NÃO aplica fill;
+                      live + FOK aplica fill após response.success;
+                      paper/dry-run mantém comportamento (fill imediato).
         """
-        import time as _t
+        # 0. Depth sizing — ajusta decision.sized_usd antes do build (live only).
+        if self._cfg.mode == "live":
+            ok, reason = await self._apply_depth_sizing(signal, decision)
+            if not ok:
+                await self._mark_skipped(signal, reason or "DEPTH_GATE")
+                return
 
-        # 1. Build order — RAM only, sub-millisecond.
+        # 1. SELL cap — não vender mais tokens do que o bot detém.
+        # Defesa contra drift entre RAM state e DB (ex: snapshot antigo,
+        # apply_fill em vôo). Cap em bot_size do token; min(signal.size, cap).
+        sell_cap: float | None = None
+        if signal.side == "SELL" and self._state is not None:
+            sell_cap = self._state.bot_size(signal.token_id)
+            if sell_cap <= 0 and not signal.bypass_slippage_check:
+                # Sem posição pra vender — sinal SELL inválido.
+                await self._mark_skipped(signal, "SELL_NO_POSITION")
+                return
+
+        # 2. Build draft — RAM only.
         draft, trade, _spec = await build_draft(
             signal=signal, sized_usd=decision.sized_usd, ref_price=ref_price,
             gamma=self._gamma, cfg=self._cfg, db_path=self._db_path,
+            sell_size_cap_tokens=sell_cap,
         )
-
         executed_price = float(draft.price)
         executed_size = float(draft.size)
-        # HFT — Optimistic Execution força FOK pra rejeição on-exchange
-        # não deixar GTC pendurado (= exposure direcional sem cobertura).
+
         order_type = self._cfg.default_order_type
         if getattr(self._cfg, "optimistic_execution", False):
             order_type = "FOK"
 
-        # 2. Submit ANTES do disco — Semaphore limita req/s ao CLOB.
-        if self._cfg.mode == "live":
-            async with self._post_semaphore:
-                try:
-                    post_resp = await self._clob.post_order(draft, order_type=order_type)
-                    self._risk.record_post_success()
-                    # FOK watchdog (só faz sentido para GTC pendurado).
-                    if order_type != "FOK" and self._cfg.fok_fallback and post_resp:
-                        order_id = post_resp.get("orderID") or post_resp.get("orderId") or ""
-                        if order_id:
-                            asyncio.create_task(watchdog_order(
-                                clob=self._clob, order_id=order_id, draft=draft,
-                                timeout_s=self._cfg.fok_fallback_timeout_seconds,
-                            ), name=f"watchdog-{order_id[:8]}")
-                except NotImplementedError:
-                    log.error("live_mode_not_wired", signal_id=signal.id)
-                    # DB persist com status final — fora do hot path.
-                    trade.status = "failed"
-                    trade.error = "LIVE_NOT_WIRED"
-                    asyncio.create_task(persist_trade_async(
-                        trade, conn=self._conn, db_path=self._db_path,
-                    ), name=f"persist-failed-{trade.id[:8]}")
-                    await self._mark_skipped(signal, "LIVE_NOT_WIRED")
-                    return
-                except PolymarketAPIError as exc:
-                    tripped = self._risk.record_post_fail()
-                    # Atualiza trade em RAM e dispara persist com status="failed".
-                    trade.status = "failed"
-                    trade.error = str(exc)[:500]
-                    asyncio.create_task(persist_trade_async(
-                        trade, conn=self._conn, db_path=self._db_path,
-                    ), name=f"persist-failed-{trade.id[:8]}")
-                    if tripped and self._on_event:
-                        await self._on_event("risk_halt", signal, None)
-                    await self._mark_skipped(signal, f"POST_FAIL: {exc}")
-                    return
-        elif self._cfg.mode == "dry-run":
+        # 3. ⚠️ Item 3 fix — INSERT trade ANTES do post_order.
+        # Garante que UPDATEs subsequentes (status submitted/failed/filled)
+        # encontram a linha. Sem isso, race entre INSERT fire-and-forget e
+        # apply_fill UPDATE corrompe audit trail.
+        try:
+            await persist_trade(trade, conn=self._conn, db_path=self._db_path)
+        except Exception as exc:  # noqa: BLE001 — DB falha não bloqueia ordem
+            log.error("persist_trade_failed", trade_id=trade.id, err=repr(exc))
+
+        # 4. Mode branch.
+        if self._cfg.mode == "dry-run":
             log.info("dry_run_skip_post", trade_id=trade.id)
-            # Dry-run ainda persiste trade (auditoria) — fire-and-forget.
-            asyncio.create_task(persist_trade_async(
-                trade, conn=self._conn, db_path=self._db_path,
-            ), name=f"persist-dryrun-{trade.id[:8]}")
+            # Dry-run não aplica fill; trade fica como pending no DB.
             return
 
-        # 3. SUCESSO: persist em paralelo + apply_fill.
-        # `create_task` retorna imediatamente; o INSERT não atrasa apply_fill.
-        asyncio.create_task(persist_trade_async(
-            trade, conn=self._conn, db_path=self._db_path,
-        ), name=f"persist-{trade.id[:8]}")
+        if self._cfg.mode != "live":
+            # Paper — simulação de fill imediato (comportamento legado).
+            await self._apply_fill_local(
+                signal=signal, trade=trade,
+                executed_size=executed_size, executed_price=executed_price,
+                start_perf=start_perf,
+            )
+            return
 
-        # 4. Update positions — write-through state cache.
+        # === LIVE ====
+        post_resp: dict[str, Any] | None = None
+        async with self._post_semaphore:
+            try:
+                post_resp = await self._clob.post_order(draft, order_type=order_type)
+                self._risk.record_post_success()
+            except NotImplementedError:
+                log.error("live_mode_not_wired", signal_id=signal.id)
+                await update_trade_status(
+                    trade.id, status="failed", error="LIVE_NOT_WIRED",
+                    conn=self._conn, db_path=self._db_path,
+                )
+                await self._mark_skipped(signal, "LIVE_NOT_WIRED")
+                return
+            except PolymarketAPIError as exc:
+                tripped = self._risk.record_post_fail()
+                await update_trade_status(
+                    trade.id, status="failed", error=str(exc),
+                    conn=self._conn, db_path=self._db_path,
+                )
+                if tripped and self._on_event:
+                    await self._on_event("risk_halt", signal, None)
+                await self._mark_skipped(signal, f"POST_FAIL: {exc}")
+                return
+
+        # Post bem-sucedido — extrai order_id e decide fluxo.
+        order_id = ""
+        if post_resp:
+            order_id = post_resp.get("orderID") or post_resp.get("orderId") or ""
+
+        # ⚠️ Item 2 — submit ≠ fill. Decisão por order_type:
+        #   FOK: response.success implica match imediato (semântica fill-or-kill).
+        #        Aplicamos fill direto.
+        #   GTC: ordem entrou no book; aguarda user_ws event de fill.
+        #        Marca submitted; trade fica em self._pending_fills.
+        if order_type == "FOK":
+            # FOK matched — aplica fill confirmado.
+            await update_trade_status(
+                trade.id, status="submitted", order_id=order_id,
+                conn=self._conn, db_path=self._db_path,
+            )
+            await self._apply_fill_local(
+                signal=signal, trade=trade,
+                executed_size=executed_size, executed_price=executed_price,
+                start_perf=start_perf,
+            )
+            return
+
+        # GTC — não aplicar fill ainda. Marca submitted + watchdog timeout.
+        await update_trade_status(
+            trade.id, status="submitted", order_id=order_id,
+            conn=self._conn, db_path=self._db_path,
+        )
+        if order_id:
+            self._pending_fills[order_id] = (signal, trade)
+            if self._cfg.fok_fallback:
+                asyncio.create_task(watchdog_order(
+                    clob=self._clob, order_id=order_id, draft=draft,
+                    timeout_s=self._cfg.fok_fallback_timeout_seconds,
+                ), name=f"watchdog-{order_id[:8]}")
+        log.info(
+            "order_submitted_awaiting_fill",
+            trade_id=trade.id, order_id=order_id, side=signal.side,
+        )
+
+    async def _apply_fill_local(
+        self, *,
+        signal: TradeSignal, trade: CopyTrade,
+        executed_size: float, executed_price: float,
+        start_perf: float,
+    ) -> None:
+        """Aplica fill confirmado: UPDATE bot_positions, UPDATE copy_trades,
+        UPDATE trade_signals, fire on_event. Caminho compartilhado entre
+        paper (fill simulado) e FOK matched live (fill imediato).
+        """
+        import time as _t
+
         await apply_fill(
             signal=signal, trade=trade,
             executed_size=executed_size, executed_price=executed_price,
@@ -421,6 +605,42 @@ class CopyEngine:
         metrics.signal_to_fill_seconds.observe(_t.perf_counter() - start_perf)
         if self._on_event:
             await self._on_event("executed", signal, trade)
+
+    async def handle_fill_event(
+        self,
+        *,
+        order_id: str,
+        executed_size: float,
+        executed_price: float,
+    ) -> bool:
+        """⚠️ Item 2 — Callback do UserWSClient para fills GTC confirmados.
+
+        Procura o trade pendente por `order_id` e aplica o fill real
+        (que pode ser parcial). Se a ordem não estiver em `_pending_fills`
+        (ex: trade fora deste processo, restart), tenta resolver via DB.
+
+        Suporta múltiplos eventos parciais: cada chamada acumula até
+        o trade ser totalmente preenchido (size restante).
+        """
+        ctx = self._pending_fills.get(order_id)
+        if ctx is None:
+            log.warning(
+                "fill_event_for_unknown_order",
+                order_id=order_id[:12], size=executed_size,
+            )
+            return False
+        signal, trade = ctx
+        # Para fill TOTAL, remove do map. Para parciais, mantém.
+        # Heurística: se executed_size >= intended, é fill final.
+        is_final = executed_size >= trade.intended_size - 1e-9
+        if is_final:
+            self._pending_fills.pop(order_id, None)
+        await self._apply_fill_local(
+            signal=signal, trade=trade,
+            executed_size=executed_size, executed_price=executed_price,
+            start_perf=0.0,  # fill async — métrica não cobre
+        )
+        return True
 
     async def _process_one(self, signal: TradeSignal) -> None:
         """Wrapper de tarefa por sinal — captura crash e libera task_done."""

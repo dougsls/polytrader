@@ -165,11 +165,18 @@ async def test_persist_trade_async_inserts(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_persist_trade_async_idempotent_on_replace(tmp_path: Path):
-    """INSERT OR REPLACE evita duplicate-key se task corre 2x."""
+async def test_persist_trade_idempotent_does_not_overwrite_status(tmp_path: Path):
+    """⚠️ Item 3 fix — INSERT OR IGNORE preserva status posterior.
+
+    Fluxo agora:
+      1. persist_trade(status='pending') antes do post_order
+      2. update_trade_status(status='filled') depois do fill
+      3. Se persist_trade rodar de novo (race/retry) NÃO deve sobrescrever
+         o status='filled' com 'pending'.
+    """
     from src.core.database import init_database, get_connection
     from src.core.models import CopyTrade
-    from src.executor.order_manager import persist_trade_async
+    from src.executor.order_manager import persist_trade_async, update_trade_status
 
     db = tmp_path / "p.db"
     await init_database(db)
@@ -181,8 +188,11 @@ async def test_persist_trade_async_idempotent_on_replace(tmp_path: Path):
         status="pending", created_at=datetime.now(timezone.utc),
     )
     await persist_trade_async(trade1, db_path=db)
-    # Reinsert com status final.
-    trade1.status = "filled"
+    # Simula UPDATE de status posterior (post_order success → submitted →
+    # fill confirmed → 'filled').
+    await update_trade_status(trade1.id, status="filled", db_path=db)
+    # Race: persist_trade roda de novo (idempotência defensiva).
+    trade1.status = "pending"  # forçar pra simular call duplicado
     await persist_trade_async(trade1, db_path=db)
 
     async with get_connection(db) as conn:
@@ -190,6 +200,7 @@ async def test_persist_trade_async_idempotent_on_replace(tmp_path: Path):
             "SELECT status FROM copy_trades WHERE id=?", ("tr-x",)
         ) as cur:
             row = await cur.fetchone()
+    # Status FINAL preservado — INSERT OR IGNORE não destrói UPDATE.
     assert row[0] == "filled"
 
 
